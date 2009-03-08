@@ -1,0 +1,22 @@
+Welcome to the High-Level Virtual Machine (HLVM) project. This open source project is designed to provide a virtual machine to support modern statically-typed functional programming languages easily and with performance characteristics ideally suited to scientific computing.
+
+HLVM is built entirely upon the LLVM infrastructure:
+
+  http://llvm.org
+
+HLVM requires LLVM 2.4 or newer. The "llvm-patch.txt" file contains a patch to the current LLVM code base that adds OCaml bindings for LLVM's instructions to handle first-class structs and also enables tail calls globally in LLVM.
+
+Once LLVM is compiled and installed (and assuming OCaml is installed), HLVM may be compiled using the script:
+
+$ ./compile.sh
+
+This creates an "hlvm" executable that, when run, JIT compiles and benchmarks a series of
+tests.
+
+Debug mode may be enabled with:
+
+$ ./hlvm --debug
+
+in which case extensive information is printed to the console describing the process of compilation (which is ideal for debugging when LLVM calls abort due to a type error in the generated code) and also from print statements injected into the generated code itself (e.g. to describe what the GC is doing as it runs).
+
+-- Jon Harrop <jon@ffconsultancy.com>

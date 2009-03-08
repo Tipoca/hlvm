@@ -544,7 +544,6 @@ let () =
   end;
   Hlvm.compile_and_run
     ((
-(*
        fib @
 	 ffib @
 	 sieve 100000000 @
@@ -554,8 +553,6 @@ let () =
 	 tco 1000000 @
 	 tuples @
 	 trig @
-*)
-	 sieve 100000000 @
 	 fold 100000000 @
 	 list 10000 @
 	 curry @
