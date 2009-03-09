@@ -137,6 +137,14 @@ let stack =
 (** Number of references on the shadow stack. *)
 let stack_depth = define_global "shadow_stack_depth" (int 0) m
 
+(** The visit stack is an array of unvisited reference types. *)
+(* FIXME: Should be dynamically resized. *)
+let visit_stack =
+  define_global "visit_stack" (const_null(lltype_of(`Array `Reference))) m
+
+(** Number of unvisited references on the visit stack. *)
+let n_visit = define_global "n_visit" (int 0) m
+
 (** The allocated list is an array of reference types and their boolean
     states (marked or unmarked). *)
 (* FIXME: Should be dynamically resized. *)
@@ -147,6 +155,7 @@ let allocated =
 (** Number of allocated references. *)
 let n_allocated = define_global "n_allocated" (int 0) m
 
+(** Number of allocations required to incur a garbage collection. *)
 let quota = define_global "quota" (int 0) m
 
 let llputchar =
@@ -645,7 +654,7 @@ and def vars = function
 	   gc_root vars state ps ty_ps;
 	   let state, _ =
 	     expr vars state
-	       (If(Load(n_allocated, `Int) <: Load(quota, `Int), Unit,
+	       (If(Load(n_allocated, `Int) <=: Load(quota, `Int), Unit,
 		   Apply(Var "gc", []))) in
 	   return vars state body ty_ret)
   | `Expr(f, ty_f) ->
@@ -690,9 +699,7 @@ and def vars = function
 		   Printf("\n", []) ] in
 	     let state, _ = expr vars state f in
 	     state#gc_restore();
-(*
 	     let state, _ = expr vars state (Apply(Var "gc", [])) in
-*)
 	     let state, _ =
 	       expr
 		 (add_val ("n", (state#load n_allocated [int 0], `Int)) vars)
@@ -855,6 +862,8 @@ let init() =
 	 let n = 1 lsl 25 in
 	 let state, (data, _) = expr vars state (Alloc(Int n, `Reference)) in
 	 state#store stack [int 0] data;
+	 let state, (data, _) = expr vars state (Alloc(Int n, `Reference)) in
+	 state#store visit_stack [int 0] data;
 	 let state, (data, _) =
 	   expr vars state (Alloc(Int n, `Struct[`Reference; `Bool])) in
 	 state#store allocated [int 0] data;
@@ -907,17 +916,52 @@ let compile_and_run defs =
 			   Apply(Var "gc_mark1", [Var "p";
 						  Var "i" +: Int 1])))))));
 
+      (* Push a reference onto the visit stack. *)
+      `UnsafeFunction
+	("gc_push", ["p", `Reference], `Unit,
+	 Let("a", Load(visit_stack, `Array `Reference),
+	     Let("n", Load(n_visit, `Int),
+		 compound
+		   [ Set(Var "a", Var "n", Var "p");
+		     Store(n_visit, Var "n" +: Int 1) ])));
+      (*
+      (* Mark this reference in the allocated list and, if it was freshly
+	marked, traverse its children. *)
+	`UnsafeFunction
+	("gc_mark", ["p", `Reference], `Unit,
+	If(AddressOf(Var "p") =: Int 0, Unit,
+	If(Apply(Var "gc_mark1", [Var "p"; Int 0]),
+	Apply(Visit(Var "p"), [Var "gc_mark"; Var "p"]),
+	Unit)));
+
+      (* Mark all roots on the shadow stack. *)
+	`UnsafeFunction
+	("gc_markall", ["i", `Int], `Unit,
+	Let("s", Load(stack, `Array `Reference),
+	Let("d", Load(stack_depth, `Int),
+	If(Var "i" =: Var "d", Unit,
+	compound
+	[ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
+	Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
+      *)
+
       (* Mark this reference in the allocated list and, if it was freshly
 	 marked, traverse its children. *)
       `UnsafeFunction
 	("gc_mark", ["p", `Reference], `Unit,
-	 Let("a", Load(allocated, `Array(`Struct[`Reference; `Bool])),
-	     Let("n", Load(n_allocated, `Int),
-		 If(AddressOf(Var "p") =: Int 0, Unit,
-		    If(Apply(Var "gc_mark1", [Var "p"; Int 0]),
-		       Apply(Visit(Var "p"), [Var "gc_mark"; Var "p"]),
-		       Unit)))));
-
+	 If(AddressOf(Var "p") =: Int 0, Unit,
+	    compound
+	      [ If(Apply(Var "gc_mark1", [Var "p"; Int 0]),
+		   Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
+		   Unit);
+		Let("n", Load(n_visit, `Int) -: Int 1,
+		    If(Var "n" <: Int 0, Unit,
+		       Let("a", Load(visit_stack, `Array `Reference),
+			   compound
+			     [ Store(n_visit, Var "n");
+			       Apply(Var "gc_mark",
+				     [Get(Var "a", Var "n")]) ]))) ]));
+      
       (* Mark all roots on the shadow stack. *)
       `UnsafeFunction
 	("gc_markall", ["i", `Int], `Unit,

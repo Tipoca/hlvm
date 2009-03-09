@@ -40,7 +40,7 @@ let sieve i : Hlvm.state Hlvm.t list =
        ("last", ["a", `Array `Bool; "i", `Int], `Int,
 	If(Get(Var "a", Var "i"), Var "i",
 	   Apply(Var "last", [Var "a"; Var "i" -: Int 1])));
-
+     
      `Function
        ("loop2", ["a", `Array `Bool; "i", `Int; "di", `Int], `Unit,
 	If(Var "i" >=: Length(Var "a"), Unit,
@@ -554,7 +554,7 @@ let () =
 	 tuples @
 	 trig @
 	 fold 100000000 @
-	 list 10000 @
+	 list 1000000 @
 	 curry @
 	 queens 8 @
 	 queens 9 @
