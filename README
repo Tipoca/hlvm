@@ -16,8 +16,9 @@ HLVM currently sports the following features:
 
 HLVM aspires to provide the following features in the future:
 
-. Parallel threads.
+. Closures.
 . Parametric polymorphism.
+. Parallel threads.
 . Global variables.
 . Per-type generic printing, comparison, equality, hashing and serialization functions.
 . A standard library.

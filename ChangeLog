@@ -1,3 +1,10 @@
+Wed Mar 11 21:05:44 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Chose to put new LLVM bindings into the HLVM project instead of
+	patching LLVM. We now have bindings for BuildExtractValue,
+	BuildInsertValue and for enabling tail call optimization globally.
+
+
 Wed Mar 11 04:01:45 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Tidied the run-time type code to reuse HLVM's own structs.

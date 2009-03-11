@@ -5,29 +5,23 @@ Dependencies
 ------------
 
 . libsigsegv >=2.5.
-. LLVM sources >=2.4.
+. LLVM sources >=2.5.
 . OCaml >=3.10.2.
 
 
 Installation
 ------------
 
-Apply the llvm-patch.txt file to the LLVM sources in order to provide bindings for build_insertvalue and build_extractvalue and to enable tail calls globally in LLVM. Then configure LLVM with:
+Configure, build and install LLVM with:
 
 $ ./configure --with-ocaml-libdir=`ocamlc -where`
+$ make -j12
+$ sudo make install
 
 WARNING: If you are using Ubuntu then you may need to disable GCC's stack smashing tests by passing gcc the -fno-stack-protector flag. The stack smashing checks seem to conflict with libsigsegv's handling of stack overflows.
 
-Then make LLVM:
 
-$ make
-
-Then install LLVM:
-
-$ sudo make install
-
-
-HLVM may be compiled using the script:
+HLVM and its auxiliary LLVM OCaml bindings may be compiled using the script:
 
 $ ./compile.sh
 

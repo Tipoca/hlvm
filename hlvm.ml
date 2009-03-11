@@ -29,10 +29,22 @@ end
 
 let debug = ref false
 
+external build_extractvalue :
+  llvalue -> int -> string -> llbuilder -> llvalue =
+      "llvm_build_extractvalue"
+      
+external build_insertvalue :
+  llvalue -> llvalue -> int -> string -> llbuilder -> llvalue =
+      "llvm_build_insertvalue"
+
+external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
+
 let mk_struct state vs =
   let llty = struct_type (Array.of_list(List.map type_of vs)) in
   let aux (i, s) x = i+1, build_insertvalue s x i "" state#bb in
   snd(List.fold_left aux (0, undef llty) vs)
+
+let () = enable_tail_call_opt()
 
 let extractvalue state s i =
   build_extractvalue s i "" state#bb
