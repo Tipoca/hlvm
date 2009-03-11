@@ -546,7 +546,7 @@ let () =
     ((
        fib @
 	 ffib @
-	 sieve 100000000 @
+	 sieve 10000000 @
 	 mandelbrot 77 @
 	 mandelbrot2 77 @
 	 mandelbrot3 77 @
@@ -554,7 +554,7 @@ let () =
 	 tuples @
 	 trig @
 	 fold 100000000 @
-	 list 1000000 @
+	 list 10000 @
 	 curry @
 	 queens 8 @
 	 queens 9 @

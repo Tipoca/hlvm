@@ -96,9 +96,10 @@ and struct_type_of tys =
 module RTType = struct
   (** The lltype of our run-time types. *)
   let lltype =
-    struct_type[|lltype_of(`Function([`Function([`Reference], `Unit);
-				      `Reference], `Unit));
-		 lltype_of(`Function([`Reference], `Unit))|]
+    lltype_of
+      (`Struct[ `Function([`Function([`Reference], `Unit);
+			   `Reference], `Unit);
+		`Function([`Reference], `Unit) ])
 
   let visit = 0
   let print = 1
@@ -239,7 +240,7 @@ class state func = object (self : 'self)
   method set_depth d = {< odepth = d >}
 end
 
-(** Create a code emitter and save the current shadow stack depth. *)
+(** Create a state object and save the current shadow stack depth. *)
 let mk_state func =
   let state = new state func in
   state#set_depth(state#load stack_depth [int 0])
@@ -325,7 +326,6 @@ and expr_aux vars state = function
       state, (v, ty)
   | Var x ->
       let x, ty_x = find x vars.vals in
-      gc_root vars state x ty_x;
       state, (x, ty_x)
   | Arith(op, f, g) ->
       let state, (f, f_ty), (g, g_ty) = expr2 vars state f g in
@@ -684,7 +684,7 @@ and def vars = function
 
       let f_name = "main" in
       let vars' =
-	defun vars CallConv.c f_name [] `Unit
+	defun vars CallConv.c f_name ["", `Unit] `Unit
 	  (fun vars state ->
 	     let size = 16384 in
 	     let stack = state#alloca (array_type i8_type size) in
@@ -714,7 +714,8 @@ and def vars = function
       let t = Unix.gettimeofday() in
       let _ =
 	let llvm_f, _ = List.assoc f_name vars'.vals in
-	ExecutionEngine.run_function llvm_f [| |] ee in
+	ExecutionEngine.run_function llvm_f
+	  [|GenericValue.of_int int_type 0|] ee in
       printf "Took %fs\n%!" (Unix.gettimeofday() -. t);
 
       vars
@@ -739,7 +740,7 @@ and def vars = function
       Llvm_analysis.assert_valid_function llvm_f;
       add_val (f, (llvm_f, `Function ty)) vars
   | `Type(c, ty) ->
-      (* Define a new reference type. *)
+      (* Define a new type constructor. *)
       let name = c ^ Type.to_string () ty in
       if !debug then
 	printf "def `Type %s\n%!" name;
@@ -831,15 +832,21 @@ and mk_array_type ty =
 and init_type name llty llvisit llprint =
   if !debug then
     printf "init_type %s\n%!" name;
+
   let f = "init_type_"^name in
   let vars =
-    defun vars cc f [] `Unit
+    defun vars CallConv.c f ["", `Unit] `Unit
       (fun vars state ->
-	 state#store llty [int 0; int32 RTType.visit] llvisit;
-	 state#store llty [int 0; int32 RTType.print] llprint;
+	 let s =
+	   Struct
+	     [ Llvalue(llvisit, `Function([`Function([`Reference], `Unit);
+					   `Reference], `Unit));
+	       Llvalue(llprint, `Function([`Reference], `Unit)) ] in
+	 let state, _ = expr vars state (Store(llty, s)) in
 	 return vars state Unit `Unit) in
   let llvm_f, _ = List.assoc f vars.vals in
-  ignore(ExecutionEngine.run_function llvm_f [| |] ee)
+  ignore(ExecutionEngine.run_function llvm_f
+	   [|GenericValue.of_int int_type 0|] ee)
 
 (** Create and memoize a function. Used to create visitor functions. *)
 and mk_fun vars cc f args ty_ret body =
@@ -856,21 +863,20 @@ let init() =
   (* Initialize the shadow stack and GC. *)
   let f_name = "init_runtime" in
   let vars' =
-    defun vars CallConv.c f_name [] `Unit
+    defun vars CallConv.c f_name ["", `Unit] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
 	 let n = 1 lsl 25 in
-	 let state, (data, _) = expr vars state (Alloc(Int n, `Reference)) in
-	 state#store stack [int 0] data;
-	 let state, (data, _) = expr vars state (Alloc(Int n, `Reference)) in
-	 state#store visit_stack [int 0] data;
-	 let state, (data, _) =
-	   expr vars state (Alloc(Int n, `Struct[`Reference; `Bool])) in
-	 state#store allocated [int 0] data;
-	 return vars state Unit `Unit) in
+	 let body =
+	   compound
+	     [ Store(stack, Alloc(Int n, `Reference));
+	       Store(visit_stack, Alloc(Int n, `Reference));
+	       Store(allocated, Alloc(Int n, `Struct[`Reference; `Bool])) ] in
+	 return vars state body `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
-    ExecutionEngine.run_function llvm_f [| |] ee in
+    ExecutionEngine.run_function llvm_f
+      [|GenericValue.of_int int_type 0|] ee in
   vars
 
 (** Compile and run a list of definitions. *)
@@ -924,26 +930,6 @@ let compile_and_run defs =
 		 compound
 		   [ Set(Var "a", Var "n", Var "p");
 		     Store(n_visit, Var "n" +: Int 1) ])));
-      (*
-      (* Mark this reference in the allocated list and, if it was freshly
-	marked, traverse its children. *)
-	`UnsafeFunction
-	("gc_mark", ["p", `Reference], `Unit,
-	If(AddressOf(Var "p") =: Int 0, Unit,
-	If(Apply(Var "gc_mark1", [Var "p"; Int 0]),
-	Apply(Visit(Var "p"), [Var "gc_mark"; Var "p"]),
-	Unit)));
-
-      (* Mark all roots on the shadow stack. *)
-	`UnsafeFunction
-	("gc_markall", ["i", `Int], `Unit,
-	Let("s", Load(stack, `Array `Reference),
-	Let("d", Load(stack_depth, `Int),
-	If(Var "i" =: Var "d", Unit,
-	compound
-	[ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
-	Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
-      *)
 
       (* Mark this reference in the allocated list and, if it was freshly
 	 marked, traverse its children. *)
@@ -1006,6 +992,3 @@ let compile_and_run defs =
   let vars = List.fold_left def vars boot in
   let _ = List.fold_left def vars defs in
   ()
-(*
-  ExecutionEngine.dispose ee
-*)
