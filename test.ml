@@ -23,19 +23,20 @@ let ffib : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "fib", [Float 40.]), `Float)]
 
-let fill (x, ty) =
+let fill ty =
   [`Function
      ("fill", [ "a", `Array ty;
+		"x", ty;
 		"i", `Int ], `Unit,
       If(Var "i" <: Length(Var "a"),
 	 compound
-	   [ Set(Var "a", Var "i", x);
-	     Apply(Var "fill", [Var "a"; Var "i" +: Int 1]) ],
+	   [ Set(Var "a", Var "i", Var "x");
+	     Apply(Var "fill", [Var "a"; Var "x"; Var "i" +: Int 1]) ],
 	 Unit))]
 
 (** Sieve of Eratosthenes. *)
 let sieve i : Hlvm.state Hlvm.t list =
-  fill(Bool true, `Bool) @
+  fill `Bool @
     [`Function
        ("last", ["a", `Array `Bool; "i", `Int], `Int,
 	If(Get(Var "a", Var "i"), Var "i",
@@ -60,7 +61,7 @@ let sieve i : Hlvm.state Hlvm.t list =
      
      `Expr(Let("a", Alloc(Int i, `Bool),
 	       compound
-		 [ Apply(Var "fill", [Var "a"; Int 0]);
+		 [ Apply(Var "fill", [Var "a"; Bool true; Int 0]);
 		   Apply(Var "loop1", [Var "a"; Int 2]);
 		   Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ]),
 	   `Int)]
@@ -263,7 +264,7 @@ let fold n : Hlvm.state Hlvm.t list =
 	       Apply(Var "fold_aux", [Int 0; Var "f"; Var "y"; Var "xs"]))] in
 
   fold (`Struct[`Float; `Float]) `Float @
-    fill(Float 1., `Float) @
+    fill `Float @
     [`Function("f", ["x", `Struct[`Float; `Float];
 		     "y", `Float], `Struct[`Float; `Float],
 	       Struct[GetValue(Var "x", 0) +:
@@ -271,13 +272,13 @@ let fold n : Hlvm.state Hlvm.t list =
 		      GetValue(Var "x", 1) +: Float 1.]);
      `Expr(Let("xs", Alloc(Int n, `Float),
 	       compound
-		 [ Apply(Var "fill", [Var "xs"; Int 0]);
+		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
 		   Apply(Var "fold",
 			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]),
 	   `Struct[`Float; `Float])]
 
 let fold n : Hlvm.state Hlvm.t list =
-  fill(Float 1., `Float) @
+  fill `Float @
     [`Function("fold_aux", ["n", `Int;
 			    "y", `Struct[`Float; `Float];
 			    "xs", `Array `Float], `Struct[`Float; `Float],
@@ -294,7 +295,7 @@ let fold n : Hlvm.state Hlvm.t list =
 
      `Expr(Let("xs", Alloc(Int n, `Float),
 	       compound
-		 [ Apply(Var "fill", [Var "xs"; Int 0]);
+		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
 		   Apply(Var "fold_aux",
 			 [Int 0; Struct[Float 0.; Float 0.]; Var "xs"])]),
 	   `Struct[`Float; `Float])]
@@ -462,66 +463,178 @@ let queens n =
 
       `Expr(Apply(Var "search", [Var "f"; Int n; nil; ps; Int 0]),
 	    `Int)]
-(*
-let queens n =
-  let x1 = Var "x1" and x2 = Var "x2" and y1 = Var "y1" and y2 = Var "y2" in
-  let ty_pos = `Struct[`Int; `Int] in
-  let rec init n f = if n=0 then [] else f(n-1) :: init (n-1) f in
-  let ps = List.flatten (init n (fun i -> init n (fun j -> i, j))) in
-  let rec expr_of_list = function
-    | [] -> nil
-    | (i, j)::t -> cons (Struct[Int i; Int j]) (expr_of_list t) in
-  let ps = expr_of_list ps in
-  ty_list ty_pos @
-  [ list_length ty_pos;
 
-   `Function("safe", ["p1", ty_pos; "p2", ty_pos], `Bool,
-	     Let("x1", GetValue(Var "p1", 0),
-		 Let("y1", GetValue(Var "p1", 1),
-		     Let("x2", GetValue(Var "p2", 0),
-			 Let("y2", GetValue(Var "p2", 1),
-			     (x1 <>: x2) &&:
-			       (y1 <>: y2) &&:
-			       (x2 -: x1 <>: y2 -: y1) &&:
-			       (x1 -: y2 <>: x2 -: y1))))));
+let gc =
+  let append ty =
+    [ `Function("aux", ["a", `Array ty;
+			"b", `Array ty;
+			"i", `Int;
+			"x", ty], `Array ty,
+		If(Var "i" <: Length(Var "a"),
+		   compound
+		     [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
+		       Apply(Var "aux", [Var "a";
+					 Var "b";
+					 Var "i" +: Int 1;
+					 Var "x"]) ],
+		   compound
+		     [ Set(Var "b", Var "i", Var "x");
+		       Var "b" ]));
 
-   `Function("filter", ["p1", ty_pos;
-			"list", `Reference], `Reference,
-	     cond_list "list" "p2" "t"
-	       (Var "list")
-	       (Let("t", Apply(Var "filter", [Var "p1"; Var "t"]),
-		    If(Apply(Var "safe", [Var "p1"; Var "p2"]),
-		       cons (Var "p2") (Var "t"),
-		       Var "t"))));
+      `Function("append", ["a", `Array ty; "x", ty], `Array ty,
+		Apply(Var "aux", [Var "a";
+				  Alloc(Length(Var "a") +: Int 1, ty);
+				  Int 0;
+				  Var "x"])) ] in
+  let q = 2047 in
+  let n = 10000 in
+  let ty_bkt = `Array(`Struct[`Reference; `Bool]) in
+  append (`Struct[`Reference; `Bool]) @
+    fill(`Struct[`Int; ty_bkt]) @
+    [ `Type("Int", `Int);
 
-   `Function("search", ["f", `Function([`Reference; `Int], `Int);
-			"n", `Int;
-			"qs", `Reference;
-			"ps", `Reference;
-			"accu", `Int], `Int,
-	     cond_list "ps" "q" "ps"
-	       (If(Apply(Var "length", [Var "qs"]) =: Var "n",
-		   Apply(Var "f", [Var "qs"; Var "accu"]),
-		   Var "accu"))
-	       (Apply(Var "search",
-		      [Var "f";
-		       Var "n";
-		       cons (Var "q") (Var "qs");
-		       Apply(Var "filter",
-			     [Var "q";
-			      Var "ps"]);
-		       Apply(Var "search",
-			     [Var "f";
-			      Var "n";
-			      Var "qs";
-			      Var "ps";
-			      Var "accu"])])));
+      `Function
+	("clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
+	 If(Var "i" =: Var "n", Unit,
+	    compound
+	      [ Let("x", Get(Var "a", Var "i"),
+		    Set(Var "a", Var "i",
+			Struct[GetValue(Var "x", 0); Bool false]));
+		Apply(Var "clear1", [Var "a"; Var "i" +: Int 1; Var "n"]) ]));
 
-   `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1);
+      `Function("clear", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			   "i", `Int ], `Unit,
+		If(Var "i" =: Length(Var "a"), Unit,
+		   compound
+		     [ Let("nb", Get(Var "a", Var "i"),
+			   Apply(Var "clear1", [ GetValue(Var "nb", 1);
+						 Int 0;
+						 GetValue(Var "nb", 0) ]));
+		       Apply(Var "clear", [Var "a"; Var "i" +: Int 1]) ]));
 
-   `Expr(Apply(Var "search", [Var "f"; Int n; nil; ps; Int 0]),
-	 `Int)]
-*)
+      `Function("abs", ["n", `Int], `Int,
+		If(Var "n" >=: Int 0, Var "n", Int 0 -: Var "n"));
+
+      (* Add the reference to the hash table. *)
+      `Function("add", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			 "p", `Reference ], `Unit,
+		Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		    Set(Var "a", Var "h",
+			Let("nb", Get(Var "a", Var "h"),
+			    Struct
+			      [ GetValue(Var "nb", 0) +: Int 1;
+				Apply(Var "append",
+				      [ GetValue(Var "nb", 1);
+					Struct[Var "p"; Bool false ] ])]))));
+
+      `Function
+	("mark1", [ "a", ty_bkt;
+		    "p", `Reference;
+		    "i", `Int ], `Bool,
+	 Let("n", Length(Var "a"),
+	     If(Var "i" =: Var "n",
+		compound
+		  [ Printf("WARNING: Pointer not found: ", []);
+		    Print(AddressOf(Var "p"));
+		    Printf("\n", []);
+		    Bool false ],
+		Let("p2", Get(Var "a", Var "i"),
+		    If(AddressOf(GetValue(Var "p2", 0)) =:
+			AddressOf(Var "p"),
+		       If(GetValue(Var "p2", 1), Bool false,
+			  compound
+			    [ Set(Var "a", Var "i",
+				  Struct[GetValue(Var "p2", 0);
+					 Bool true]);
+			      Bool true ]),
+		       Apply(Var "mark1", [ Var "a";
+					    Var "p";
+					    Var "i" +: Int 1 ]))))));
+
+      `Function("mark0", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			   "p", `Reference ], `Bool,
+		Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		    Apply(Var "mark1", [ GetValue(Get(Var "a", Var "h"), 1);
+					 Var "p";
+					 Int 0 ])));
+
+      `Function
+	("sweep1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Struct[`Int; ty_bkt],
+	 If(Var "i" =: Var "n", Struct[Var "n"; Var "a"],
+	    Let("p", Get(Var "a", Var "i"),
+		compound
+		  [ If(GetValue(Var "p", 1),
+		       Apply(Var "sweep1", [ Var "a";
+					     Var "i" +: Int 1;
+					     Var "n" ]),
+		       compound
+			 [ Print(GetValue(Var "p", 0));
+			   Printf("\n", []);
+			   Set(Var "a", Var "i",
+			       Get(Var "a", Length(Var "a") -: Int 1));
+			   Apply(Var "sweep1", [ Var "a";
+						 Var "i";
+						 Var "n" -: Int 1 ]) ])])));
+
+      `Function("sweep", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			   "i", `Int ], `Unit,
+		If(Var "i" =: Length(Var "a"), Unit,
+		   compound
+		     [ Set(Var "a", Var "i",
+			   Let("nb", Get(Var "a", Var "i"),
+			       Apply(Var "sweep1",
+				     [ GetValue(Var "nb", 1);
+				       Int 0;
+				       GetValue(Var "nb", 0) ])));
+		       Apply(Var "sweep", [ Var "a";
+					    Var "i" +: Int 1 ]) ]));
+
+      `Function("loop1", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			   "b", `Array `Reference;
+			   "n", `Int ], `Unit,
+		If(Var "n" =: Length(Var "b"), Unit,
+		   Let("x", Construct("Int", Var "n"),
+		       compound
+			 [ Apply(Var "add", [Var "a"; Var "x"]);
+			   Set(Var "b", Var "n", Var "x");
+			   Apply(Var "loop1",
+				 [ Var "a";
+				   Var "b";
+				   Var "n" +: Int 1 ])])));
+
+      `Function("loop2", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			   "b", `Array `Reference;
+			   "i", `Int ], `Unit,
+		If(Var "i" =: Length(Var "b"), Unit,
+		   compound
+		     [ Apply(Var "mark0", [ Var "a";
+					    Get(Var "b", Var "i") ]);
+		       Apply(Var "loop2", [ Var "a";
+					    Var "b";
+					    Var "i" +: Int 1 ]) ]));
+
+      `Expr(Let("a", Alloc(Int q, `Struct[`Int; ty_bkt]),
+		Let("b", Alloc(Int n, `Reference),
+		    compound
+		      [ Apply(Var "fill",
+			      [ Var "a";
+				Struct[Int 0;
+				       Alloc(Int 0,
+					     `Struct[`Reference; `Bool])];
+				Int 0 ]);
+			Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
+			Apply(Var "loop1", [ Var "a";
+					     Var "b";
+					     Int 0 ]);
+			Apply(Var "add", [Var "a"; Construct("Int", Int(-2))]);
+			Apply(Var "clear", [ Var "a"; Int 0 ]);
+			Apply(Var "loop2", [ Var "a";
+					     Var "b";
+					     Int 0 ]);
+			Apply(Var "sweep", [ Var "a"; Int 0 ]);
+		      ])),
+	    `Array `Int) ]
+
 (** Insert debug information at the beginning of each function. *)
 let rec trace : Hlvm.state Hlvm.t list -> Hlvm.state Hlvm.t list = function
   | `Function(f, args, ty_ret, body)::t ->
@@ -546,7 +659,7 @@ let () =
     ((
        fib @
 	 ffib @
-	 sieve 10000000 @
+	 sieve 100000000 @
 	 mandelbrot 77 @
 	 mandelbrot2 77 @
 	 mandelbrot3 77 @
@@ -554,11 +667,12 @@ let () =
 	 tuples @
 	 trig @
 	 fold 100000000 @
-	 list 10000 @
+	 list 1000000 @
 	 curry @
 	 queens 8 @
 	 queens 9 @
 	 queens 10 @
 	 queens 11 @
+	 gc @
 	 []
      ))

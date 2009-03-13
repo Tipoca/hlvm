@@ -160,10 +160,12 @@ let n_visit = define_global "n_visit" (int 0) m
 
 (** The allocated list is an array of reference types and their boolean
     states (marked or unmarked). *)
-(* FIXME: Should be dynamically resized. *)
 let allocated =
   define_global "allocated"
-    (const_null(lltype_of(`Array(`Struct[`Reference; `Bool])))) m
+    (const_null(lltype_of(`Array(`Struct[`Int;`Array(`Struct[`Reference; `Bool])])))) m
+(*
+    (const_null(lltype_of(`Array(`Array(`Struct[`Reference; `Bool]))))) m
+*)
 
 (** Number of allocated references. *)
 let n_allocated = define_global "n_allocated" (int 0) m
@@ -179,6 +181,14 @@ let llexit =
 
 let llprintf =
   declare_function "printf" (var_arg_function_type int_type [|string_type|]) m
+
+let llalloc =
+  declare_function "hlvm_alloc"
+    (function_type string_type [|int_type; int_type|]) m
+
+let llfree =
+  declare_function "hlvm_free"
+    (function_type void_type [|string_type|]) m
 
 let cc = CallConv.fast
 
@@ -219,13 +229,18 @@ class state func = object (self : 'self)
   val blk = entry_block func
   val odepth = int 0
   val gc_enabled = true
+  val roots = false
   method blk = blk
   method bb = builder_at_end blk
   method gep a ns = build_gep a (Array.of_list ns) "" self#bb
   method load a ns = build_load (self#gep a ns) "" self#bb
   method store a ns x = ignore(build_store x (self#gep a ns) self#bb)
-  method malloc ty n = build_array_malloc ty n "" self#bb
-  method free x = ignore(build_free x self#bb)
+  method malloc llty n =
+    let size = build_trunc (size_of llty) int_type "" self#bb in
+    let data = build_call llalloc [|n; size|] "" self#bb in
+    self#bitcast data (pointer_type llty)
+  method free x =
+    ignore(build_call llfree [|x|] "" self#bb)
   method define_global x v = define_global x v m
   method mk s = {< blk = append_block s func >}
   method ret v = ignore(build_ret v self#bb)
@@ -238,14 +253,14 @@ class state func = object (self : 'self)
   method sret = param func 0
   method alloca ty =
     build_alloca ty "" (builder_at_end(entry_block func))
+  method gc_enabled = gc_enabled
   method gc_root v =
-    if gc_enabled then
-      push self stack stack_depth v
-  method gc_alloc v =
-    if gc_enabled then
-      push self allocated n_allocated (mk_struct self [v; const_int i1_type 0])
+    if not gc_enabled then self else begin
+      push self stack stack_depth v;
+      {< roots = true >}
+    end
   method gc_restore() =
-    if gc_enabled then
+    if gc_enabled && roots then
       gc_restore self
   method no_gc = {< gc_enabled = false >}
   method odepth = odepth
@@ -270,6 +285,7 @@ let uniq =
   aux
 
 exception Returned
+exception Handled of exn
 
 type 'a t =
     [ `UnsafeFunction of string * (string * Type.t) list * Type.t * 'a Expr.t
@@ -278,12 +294,22 @@ type 'a t =
     | `Extern of string * Type.t list * Type.t
     | `Type of string * Type.t ]
 
+let type_check err ty1 ty2 =
+  if not(Type.eq ty1 ty2) then
+    invalid_arg
+      (sprintf "%s: %a != %a" err Type.to_string ty1 Type.to_string ty2)
+
 (** Compile an expression in the context of current vars into the given
     LLVM state. *)
 let rec expr vars state e =
   if !debug then
     printf "-> expr %s\n%!" (Expr.to_string () e);
-  let state, (x, ty_x) as ret = expr_aux vars state e in
+  let state, (x, ty_x) as ret =
+    try expr_aux vars state e with
+    | Returned as exn -> raise exn
+    | exn ->
+	printf "ERROR: %s\n%!" (Expr.to_string () e);
+	raise exn in
   if !debug then
     printf "<- %s\n%!" (string_of_lltype(type_of x));
   ret
@@ -315,8 +341,8 @@ and expr_aux vars state = function
 	    let state, px = malloc state (lltype_of ty_x) (int 1) in
 	    state#store px [int 0] x;
 	    let s = Ref.mk state llty (int 0) px in
-	    gc_root vars state s `Reference;
-	    state#gc_alloc s;
+	    let state = gc_root vars state s `Reference in
+	    let state = gc_alloc vars state s in
 	    state, s in
       state, (s, `Reference)
   | IsType(f, ty_name) ->
@@ -334,7 +360,7 @@ and expr_aux vars state = function
       let v = extractvalue state f Ref.data in
       let v = state#bitcast v (pointer_type(lltype_of ty)) in
       let v = state#load v [int 0] in
-      gc_root vars state v ty;
+      let state = gc_root vars state v ty in
       state, (v, ty)
   | Var x ->
       let x, ty_x = find x vars.vals in
@@ -388,7 +414,7 @@ and expr_aux vars state = function
       t_state#br k_state;
       let f_state, (f, ty_f) = expr vars f_state f in
       f_state#br k_state;
-      assert(Type.eq ty_t ty_f);
+      type_check "If" ty_t ty_f;
       k_state, (build_phi [t, t_state#blk; f, f_state#blk] "" k_state#bb, ty_t)
   | Return(Let(x, f, g), ty_ret) ->
       (* Tail expression in "rest". *)
@@ -402,8 +428,8 @@ and expr_aux vars state = function
       assert(Type.eq ty_n `Int);
       let state, data = malloc state (lltype_of ty) n in
       let a, ty_a = Ref.mk state (mk_array_type ty) n data, `Array ty in
-      gc_root vars state a ty_a;
-      state#gc_alloc a;
+      let state = gc_root vars state a ty_a in
+      let state = gc_alloc vars state a in
       state, (a, ty_a)
   | Length a ->
       let state, (a, ty_a) = expr vars state a in
@@ -413,18 +439,30 @@ and expr_aux vars state = function
       let state, (a, ty_a), (i, ty_i) = expr2 vars state a i in
       let ty_elt = match ty_a with
 	| `Array ty -> ty
-	| _ -> assert false in
-      assert(Type.eq ty_i `Int);
+	| _ -> invalid_arg "Index into non-array type" in
+      type_check "Index" ty_i `Int;
+      let state, _ =
+	expr vars state
+	  (If((Llvalue(i, `Int) >=: Int 0) &&:
+		(Llvalue(i, `Int) <: Length(Llvalue(a, ty_a))), Unit,
+	      compound [ Printf("Array index out of bounds\n", []);
+			 Exit(Int 1) ])) in
       let data = extractvalue state a Ref.data in
       let data = state#bitcast data (pointer_type(lltype_of ty_elt)) in
       let x, ty_x = state#load data [i], ty_elt in
-      gc_root vars state x ty_x;
+      let state = gc_root vars state x ty_x in
       state, (x, ty_x)
   | Set(a, i, x) ->
       let state, (a, ty_a), (i, ty_i), (x, ty_x) =
 	expr3 vars state a i x in
       assert(Type.eq ty_a (`Array ty_x));
       assert(Type.eq ty_i `Int);
+      let state, _ =
+	expr vars state
+	  (If((Llvalue(i, `Int) >=: Int 0) &&:
+		(Llvalue(i, `Int) <: Length(Llvalue(a, ty_a))), Unit,
+	      compound [ Printf("Array index out of bounds\n", []);
+			 Exit(Int 1) ])) in
       let data = extractvalue state a Ref.data in
       let data = state#bitcast data (pointer_type(lltype_of ty_x)) in
       state#store data [i] x;
@@ -437,13 +475,13 @@ and expr_aux vars state = function
 	| `Function(tys_arg', ty_ret') when is_struct ty_ret' ->
 	    (* Tail call returning struct. Pass the sret given to us by our
 	       caller on to our tail callee. *)
-	    assert(List.for_all2 Type.eq tys_arg tys_arg');
-	    assert(Type.eq ty_ret ty_ret');
+	    List.iter2 (type_check "Arg") tys_arg tys_arg';
+	    type_check "Return" ty_ret ty_ret';
             state#call cc f (state#sret :: args)
         | `Function(tys_arg', ty_ret') ->
 	    (* Tail call returning single value. *)
-	    assert(List.for_all2 Type.eq tys_arg tys_arg');
-	    assert(Type.eq ty_ret ty_ret');
+	    List.iter2 (type_check "Arg") tys_arg tys_arg';
+	    type_check "Return" ty_ret ty_ret';
 	    state#call cc f args
         | _ -> assert false in
       set_tail_call true call;
@@ -456,16 +494,16 @@ and expr_aux vars state = function
 	match ty_f with
 	| `Function(tys_arg', ty_ret) when is_struct ty_ret ->
 	    (* Non-tail call returning multiple values. *)
-            assert(List.for_all2 Type.eq tys_arg tys_arg');
+	    List.iter2 (type_check "Arg") tys_arg tys_arg';
             let ret = state#alloca (lltype_of ty_ret) in
             let _ = state#call cc f (ret :: args) in
             state#load ret [int 0], ty_ret
 	| `Function(tys_arg', ty_ret) ->
 	    (* Non-tail call returning single value. *)
-	    assert(List.for_all2 Type.eq tys_arg tys_arg');
+	    List.iter2 (type_check "Arg") tys_arg tys_arg';
 	    state#call cc f args, ty_ret
 	| _ -> assert false in
-      gc_root vars state ret ty_ret;
+      let state = gc_root vars state ret ty_ret in
       state, (ret, ty_ret)
   | Printf(spec, args) ->
       let spec =
@@ -555,7 +593,7 @@ and expr_aux vars state = function
       state, (f, ty)
   | Return(f, ty_ret) when is_struct ty_ret ->
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_ret ty_f);
+      type_check "Return" ty_ret ty_f;
       state#store state#sret [int 0] f;
       state#gc_restore();
       state#ret (int 0);
@@ -590,12 +628,6 @@ and return vars state f ty_f =
 
 and malloc state ty n =
   let data = state#malloc ty n in
-  let state, _ =
-    let data = build_ptrtoint data int_type "" state#bb in
-    expr (add_val ("data", (data, `Int)) vars) state
-      (If(Cmp(`Eq, Var "data", Int 0),
-	  compound[Printf("Out of memory\n", []); Exit(Int 1)],
-	  Unit)) in
   state, data
 
 (** Register all reference types in the given value as live roots for the
@@ -604,13 +636,21 @@ and gc_root vars state v ty =
   if !debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
   match ty with
-  | `Unit | `Bool | `Int | `Float | `Function _ -> ()
+  | `Unit | `Bool | `Int | `Float | `Function _ -> state
   | `Struct tys ->
-      let f i ty =
-	gc_root vars state (extractvalue state v i) ty in
-      List.iteri f tys
+      let f (i, state) ty =
+	i+1, gc_root vars state (extractvalue state v i) ty in
+      snd(List.fold_left f (0, state) tys)
   | `Array _  | `Reference ->
       state#gc_root v
+
+and gc_alloc vars state v =
+  if not state#gc_enabled then state else
+    let state, _ =
+      expr vars state
+	(compound [ Apply(Var "gc_add", [Llvalue(v, `Reference)]);
+		    Store(n_allocated, Load(n_allocated, `Int) +: Int 1) ]) in
+    state
 
 (** Define a function with the given calling convention, name, arguments
     and return type using the function argument "k" to fill in the body of the
@@ -663,7 +703,7 @@ and def vars = function
 	   let state, (ps, ty_ps) =
 	     expr vars state
 	       (Struct(List.map (fun (s, _) -> Var s) vars.vals)) in
-	   gc_root vars state ps ty_ps;
+	   let state = gc_root vars state ps ty_ps in
 	   let state, _ =
 	     expr vars state
 	       (If(Load(n_allocated, `Int) <=: Load(quota, `Int), Unit,
@@ -711,12 +751,10 @@ and def vars = function
 		   Printf("\n", []) ] in
 	     let state, _ = expr vars state f in
 	     state#gc_restore();
-	     let state, _ = expr vars state (Apply(Var "gc", [])) in
 	     let state, _ =
-	       expr
-		 (add_val ("n", (state#load n_allocated [int 0], `Int)) vars)
-		 state
-		 (Printf("Allocated blocks: %d\n", [Var "n"]))in
+	       expr vars state
+		 (Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
+	     let state, _ = expr vars state (Apply(Var "gc", [])) in
 	     let _ =
 	       state#call CallConv.c stackoverflow_deinstall_handler [] in
 	     return vars state Unit `Unit) in
@@ -871,11 +909,36 @@ and mk_fun vars cc f args ty_ret body =
     Hashtbl.add functions f llty;
     llty
 
+(* A larger hash table improves performance on large heaps but degrades
+   performance on small heaps. *)
+let q = 997    (* 20.94s 23.19s *)
+let q = 2047   (* 10.77s 22.57s *)
+let q = 4093   (*  6.18s 27.39s *)
+let q = 8191   (*  3.96s 30.78s *)
+let q = 9973   (*  3.62s 31.19s *)
+let q = 30011  (*  2.54s 50.18s *)
+let q = 524287 (*  2.16s 74.92s *)
+
+let q = 16381  (*  2.95s 36.65s *)
+
+let ty_bkt = `Array(`Struct[`Reference; `Bool])
+let fill ty =
+  `UnsafeFunction
+    ("fill", [ "a", `Array ty;
+	       "x", ty;
+	       "i", `Int ], `Unit,
+     If(Var "i" <: Length(Var "a"),
+	compound
+	  [ Set(Var "a", Var "i", Var "x");
+	    Apply(Var "fill", [Var "a"; Var "x"; Var "i" +: Int 1]) ],
+	Unit))
+
 let init() =
   (* Initialize the shadow stack and GC. *)
   let f_name = "init_runtime" in
+  let vars' = def vars (fill(`Struct[`Int; ty_bkt])) in
   let vars' =
-    defun vars CallConv.c f_name ["", `Unit] `Unit
+    defun vars' CallConv.c f_name ["", `Unit] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
 	 let n = 1 lsl 25 in
@@ -883,7 +946,13 @@ let init() =
 	   compound
 	     [ Store(stack, Alloc(Int n, `Reference));
 	       Store(visit_stack, Alloc(Int n, `Reference));
-	       Store(allocated, Alloc(Int n, `Struct[`Reference; `Bool])) ] in
+	       Store(allocated, Alloc(Int q, `Struct[`Int; ty_bkt]));
+	       Apply(Var "fill",
+		     [ Load(allocated, `Array(`Struct[`Int; ty_bkt]));
+		       Struct[Int 0;
+			      Alloc(Int 0,
+				    `Struct[`Reference; `Bool])];
+		       Int 0 ]) ] in
 	 return vars state body `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
@@ -897,110 +966,196 @@ let compile_and_run defs =
   let printf(x, y) =
     if !debug then Printf(x, y) else Unit in
   let boot : 'a t list =
-    [ (* Clear all of the mark bits in the allocated list. *)
-      `UnsafeFunction
-	("gc_clear", ["i", `Int], `Unit,
-	 Let("a", Load(allocated, `Array(`Struct[`Reference; `Bool])),
-	     Let("n", Load(n_allocated, `Int),
-		 If(Var "i" =: Var "n", Unit,
-		    compound
-		      [ Let("x", Get(Var "a", Var "i"),
-			    Set(Var "a", Var "i",
-				Struct[GetValue(Var "x", 0); Bool false]));
-			Apply(Var "gc_clear", [Var "i" +: Int 1]) ]))));
-
-      (* Search the allocated list for the given reference and mark it,
-	 returning whether or not it was freshly marked. *)
-      `UnsafeFunction
-	("gc_mark1", ["p", `Reference;
-		      "i", `Int], `Bool,
-	 Let("a", Load(allocated, `Array(`Struct[`Reference; `Bool])),
-	     Let("n", Load(n_allocated, `Int),
-		 If(Var "i" =: Var "n",
-		    compound
-		      [ Printf("WARNING: Pointer not found: ", []);
-			Print(AddressOf(Var "p"));
-			Printf("\n", []);
-			Bool false ],
-		    Let("p2", Get(Var "a", Var "i"),
-			If(AddressOf(GetValue(Var "p2", 0)) =:
-			    AddressOf(Var "p"),
-			   If(GetValue(Var "p2", 1), Bool false,
-			      compound
-				[ Set(Var "a", Var "i",
-				      Struct[GetValue(Var "p2", 0);
-					     Bool true]);
-				  Bool true ]),
-			   Apply(Var "gc_mark1", [Var "p";
-						  Var "i" +: Int 1])))))));
-
-      (* Push a reference onto the visit stack. *)
-      `UnsafeFunction
-	("gc_push", ["p", `Reference], `Unit,
-	 Let("a", Load(visit_stack, `Array `Reference),
-	     Let("n", Load(n_visit, `Int),
-		 compound
-		   [ Set(Var "a", Var "n", Var "p");
-		     Store(n_visit, Var "n" +: Int 1) ])));
-
-      (* Mark this reference in the allocated list and, if it was freshly
-	 marked, traverse its children. *)
-      `UnsafeFunction
-	("gc_mark", ["p", `Reference], `Unit,
-	 If(AddressOf(Var "p") =: Int 0, Unit,
-	    compound
-	      [ If(Apply(Var "gc_mark1", [Var "p"; Int 0]),
-		   Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
-		   Unit);
-		Let("n", Load(n_visit, `Int) -: Int 1,
-		    If(Var "n" <: Int 0, Unit,
-		       Let("a", Load(visit_stack, `Array `Reference),
+    let append ty =
+      [ `UnsafeFunction("aux", ["a", `Array ty;
+				"b", `Array ty;
+				"i", `Int;
+				"x", ty], `Array ty,
+			If(Var "i" <: Length(Var "a"),
 			   compound
-			     [ Store(n_visit, Var "n");
-			       Apply(Var "gc_mark",
-				     [Get(Var "a", Var "n")]) ]))) ]));
-      
-      (* Mark all roots on the shadow stack. *)
-      `UnsafeFunction
-	("gc_markall", ["i", `Int], `Unit,
-	 Let("s", Load(stack, `Array `Reference),
-	     Let("d", Load(stack_depth, `Int),
-		 If(Var "i" =: Var "d", Unit,
-		    compound
-		      [ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
-			Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
+			     [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
+			       Apply(Var "aux", [Var "a";
+						 Var "b";
+						 Var "i" +: Int 1;
+						 Var "x"]) ],
+			   compound
+			     [ Set(Var "b", Var "i", Var "x");
+			       If(Var "i" >: Int 1, Free(Var "a"), Unit);
+			       Var "b" ]));
 
-      (* Free all unmarked values. When a value is freed the last allocated
-	 value is moved over the top of it and the number of allocated values
-	 is decremented. *)
-      `UnsafeFunction
-	("gc_sweep", ["i", `Int], `Unit,
-	 Let("a", Load(allocated, `Array(`Struct[`Reference; `Bool])),
-	     Let("n", Load(n_allocated, `Int),
-		 If(Var "i" =: Var "n", Unit,
-		    Let("p", Get(Var "a", Var "i"),
-			compound
-			  [ If(GetValue(Var "p", 1),
-			       Apply(Var "gc_sweep", [Var "i" +: Int 1]),
-			       compound
-				 [ Free(GetValue(Var "p", 0));
-				   Set(Var "a", Var "i",
-				       Get(Var "a", Var "n" -: Int 1));
-				   Store(n_allocated, Var "n" -: Int 1);
-				   Apply(Var "gc_sweep", [Var "i"]) ])])))));
+	`UnsafeFunction("append", ["a", `Array ty; "x", ty], `Array ty,
+			Apply(Var "aux", [Var "a";
+					  Alloc(Length(Var "a") +: Int 1, ty);
+					  Int 0;
+					  Var "x"])) ] in
+    append (`Struct[`Reference; `Bool]) @
+      [ `UnsafeFunction
+	  ("clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
+	   If(Var "i" =: Var "n", Unit,
+	      compound
+		[ Let("x", Get(Var "a", Var "i"),
+		      Set(Var "a", Var "i",
+			  Struct[GetValue(Var "x", 0); Bool false]));
+		  Apply(Var "clear1", [ Var "a";
+					Var "i" +: Int 1;
+					Var "n" ]) ]));
 
-      (* Clear, mark and sweep. *)
-      `UnsafeFunction
-	("gc", [], `Unit,
-	 compound
-	   [ printf("GC clearing... %d %d\n", [Load(n_allocated, `Int); Load(stack_depth, `Int)]);
-	     Apply(Var "gc_clear", [Int 0]);
-	     printf("GC marking...\n", []);
-	     Apply(Var "gc_markall", [Int 0]);
-	     printf("GC sweeping...\n", []);
-	     Apply(Var "gc_sweep", [Int 0]);
-	     printf("GC done. %d %d\n", [Load(n_allocated, `Int); Load(stack_depth, `Int)]);
-	     Store(quota, Int 2 *: Load(n_allocated, `Int))]) ] in
+	`UnsafeFunction
+	  ("gc_clear", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			 "i", `Int ], `Unit,
+	   If(Var "i" =: Length(Var "a"), Unit,
+	      compound
+		[ Let("nb", Get(Var "a", Var "i"),
+		      Apply(Var "clear1", [ GetValue(Var "nb", 1);
+					    Int 0;
+					    GetValue(Var "nb", 0) ]));
+		  Apply(Var "gc_clear", [Var "a"; Var "i" +: Int 1]) ]));
+	
+	`UnsafeFunction("abs", ["n", `Int], `Int,
+			If(Var "n" >=: Int 0, Var "n", Int 0 -: Var "n"));
+
+	(* Add the reference to the hash table of allocated values. *)
+	`UnsafeFunction
+	  ("gc_add", [ "p", `Reference ], `Unit,
+	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+
+	       Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		   Set(Var "a", Var "h",
+		       Let("nb", Get(Var "a", Var "h"),
+			   Let("n", GetValue(Var "nb", 0),
+			       Let("b", GetValue(Var "nb", 1),
+				   If(Var "n" <: Length(Var "b"),
+				      compound
+					[ Set(Var "b", Var "n",
+					      Struct[Var "p"; Bool false]);
+					  Struct[Var "n" +: Int 1;
+						 Var "b"] ],
+				      Struct
+					[ Var "n" +: Int 1;
+					  Apply(Var "append",
+						[ Var "b";
+						  Struct[Var "p";
+							 Bool false ] ])]
+				     ))))))));
+
+	`UnsafeFunction
+	  ("mark1", [ "a", ty_bkt;
+		      "p", `Reference;
+		      "i", `Int ], `Bool,
+	   Let("n", Length(Var "a"),
+	       If(Var "i" =: Var "n",
+		  compound
+		    [ Printf("WARNING: Pointer not found: ", []);
+		      Print(AddressOf(Var "p"));
+		      Printf("\n", []);
+		      Bool false ],
+		  Let("p2", Get(Var "a", Var "i"),
+		      If(AddressOf(GetValue(Var "p2", 0)) =:
+			  AddressOf(Var "p"),
+			 If(GetValue(Var "p2", 1), Bool false,
+			    compound
+			      [ Set(Var "a", Var "i",
+				    Struct[GetValue(Var "p2", 0);
+					   Bool true]);
+				Bool true ]),
+			 Apply(Var "mark1", [ Var "a";
+					      Var "p";
+					      Var "i" +: Int 1 ]))))));
+
+	`UnsafeFunction
+	  ("mark0", [ "p", `Reference ], `Bool,
+	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+	       Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		   Apply(Var "mark1", [ GetValue(Get(Var "a", Var "h"), 1);
+					Var "p";
+					Int 0 ]))));
+
+	(* Push a reference onto the visit stack. *)
+	`UnsafeFunction
+	  ("gc_push", ["p", `Reference], `Unit,
+	   If(AddressOf(Var "p") =: Int 0, Unit,
+	      Let("a", Load(visit_stack, `Array `Reference),
+		  Let("n", Load(n_visit, `Int),
+		      compound
+			[ Set(Var "a", Var "n", Var "p");
+			  Store(n_visit, Var "n" +: Int 1) ]))));
+	
+	(* Mark this reference in the allocated list and, if it was freshly
+	   marked, traverse its children. *)
+	`UnsafeFunction
+	  ("gc_mark", [ "p", `Reference ], `Unit,
+	   If(AddressOf(Var "p") =: Int 0, Unit,
+	      compound
+		[ If(Apply(Var "mark0", [Var "p"]),
+		     Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
+		     Unit);
+		  Let("n", Load(n_visit, `Int) -: Int 1,
+		      If(Var "n" <: Int 0, Unit,
+			 Let("a", Load(visit_stack, `Array `Reference),
+			     compound
+			       [ Store(n_visit, Var "n");
+				 Apply(Var "gc_mark",
+				       [Get(Var "a", Var "n")]) ]))) ]));
+	
+	(* Mark all roots on the shadow stack. *)
+	`UnsafeFunction
+	  ("gc_markall", ["i", `Int], `Unit,
+	   Let("s", Load(stack, `Array `Reference),
+	       Let("d", Load(stack_depth, `Int),
+		   If(Var "i" =: Var "d", Unit,
+		      compound
+			[ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
+			  Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
+
+	`UnsafeFunction
+	  ("sweep1", [ "a", ty_bkt; "i", `Int; "n", `Int ],
+	   `Struct[`Int; ty_bkt],
+	   If(Var "i" =: Var "n", Struct[Var "n"; Var "a"],
+	      Let("p", Get(Var "a", Var "i"),
+		  compound
+		    [ If(GetValue(Var "p", 1),
+			 Apply(Var "sweep1", [ Var "a";
+					       Var "i" +: Int 1;
+					       Var "n" ]),
+			 compound
+			   [ (*Printf("free(%d)\n",
+			       [AddressOf(GetValue(Var "p", 0))]);*)
+			     Store(n_allocated,
+				   Load(n_allocated, `Int) -: Int 1);
+			     Free(GetValue(Var "p", 0));
+			     Set(Var "a", Var "i",
+				 Get(Var "a", Var "n" -: Int 1));
+			     Apply(Var "sweep1", [ Var "a";
+						   Var "i";
+						   Var "n" -: Int 1 ]) ])])));
+
+	`UnsafeFunction
+	  ("gc_sweep", [ "a", `Array(`Struct[`Int; ty_bkt]);
+			 "i", `Int ], `Unit,
+	   If(Var "i" =: Length(Var "a"), Unit,
+	      compound
+		[ Set(Var "a", Var "i",
+		      Let("nb", Get(Var "a", Var "i"),
+			  Apply(Var "sweep1",
+				[ GetValue(Var "nb", 1);
+				  Int 0;
+				  GetValue(Var "nb", 0) ])));
+		  Apply(Var "gc_sweep", [ Var "a";
+					  Var "i" +: Int 1 ]) ]));
+
+	(* Clear, mark and sweep. *)
+	`UnsafeFunction
+	  ("gc", [], `Unit,
+	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+	       compound
+		 [ printf("GC clearing...\n", []);
+		   Apply(Var "gc_clear", [Var "a"; Int 0]);
+		   printf("GC marking...\n", []);
+		   Apply(Var "gc_markall", [Int 0]);
+		   printf("GC sweeping...\n", []);
+		   Apply(Var "gc_sweep", [Var "a"; Int 0]);
+		   printf("GC done.\n", []);
+		   Store(quota, Int 4 *: Load(n_allocated, `Int))])) ] in
   let vars = List.fold_left def vars boot in
   let _ = List.fold_left def vars defs in
   ()

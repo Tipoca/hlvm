@@ -1,3 +1,13 @@
+Fri Mar 13 02:42:33 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Switched from LLVM's malloc intrinsic to helper functions for alloc
+	(using calloc in order to initialize references to NULL) and free.
+	* Optimized the GC to use a hash table instead of linear search,
+	improving performance by up to 100x on our benchmarks.
+	* Avoided resetting the shadow stack at the ends of functions that do
+	not push any roots onto it.
+
+
 Wed Mar 11 21:05:44 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Chose to put new LLVM bindings into the HLVM project instead of

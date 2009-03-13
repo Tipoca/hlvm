@@ -45,6 +45,7 @@ let ( +: ) f g = Arith(`Add, f, g)
 let ( -: ) f g = Arith(`Sub, f, g)
 let ( *: ) f g = Arith(`Mul, f, g)
 let ( /: ) f g = Arith(`Div, f, g)
+let ( %: ) f g = Arith(`Mod, f, g)
 let ( &&: ) f g = If(f, g, Bool false)
 let ( ||: ) f g = If(f, Bool true, g)
 let rec compound = function
