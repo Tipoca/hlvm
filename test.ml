@@ -395,14 +395,6 @@ let list_length ty : Hlvm.state Hlvm.t =
 	      (Int 0)
 	      (Int 1 +: Apply(Var "length", [Var "t"])))
 
-let list_length ty : Hlvm.state Hlvm.t =
-  `Function("length", ["list", `Reference], `Int,
-	    cond_list "list" "h" "t"
-	      (Int 0)
-	      (cond_list "t" "h" "t"
-		 (Int 1)
-		 (Int 2 +: Apply(Var "length", [Var "t"]))))
-
 let queens n =
   let x1 = Var "x1" and x2 = Var "x2" and y1 = Var "y1" and y2 = Var "y2" in
   let ty_pos = `Struct[`Int; `Int] in

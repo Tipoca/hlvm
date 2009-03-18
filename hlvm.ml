@@ -1118,9 +1118,7 @@ let compile_and_run defs =
 					       Var "i" +: Int 1;
 					       Var "n" ]),
 			 compound
-			   [ (*Printf("free(%d)\n",
-			       [AddressOf(GetValue(Var "p", 0))]);*)
-			     Store(n_allocated,
+			   [ Store(n_allocated,
 				   Load(n_allocated, `Int) -: Int 1);
 			     Free(GetValue(Var "p", 0));
 			     Set(Var "a", Var "i",
