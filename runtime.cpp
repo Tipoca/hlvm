@@ -1,5 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cstdlib>
+
+extern "C" {
 
 void *hlvm_alloc(int n, int m) {
   if (n*m == 0) return 0;
@@ -13,4 +15,6 @@ void *hlvm_alloc(int n, int m) {
 
 void hlvm_free(void *n) {
   if (n != 0) free(n);
+}
+
 }
