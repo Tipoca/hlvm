@@ -182,13 +182,21 @@ let llexit =
 let llprintf =
   declare_function "printf" (var_arg_function_type int_type [|string_type|]) m
 
-let llalloc =
-  declare_function "hlvm_alloc"
-    (function_type string_type [|int_type; int_type|]) m
+let lldlopen =
+  declare_function "dlopen"
+    (function_type string_type [|string_type; int_type|]) m
 
+let lldlsym =
+  declare_function "dlsym"
+    (function_type string_type [|string_type; string_type|]) m
+
+let llalloc_ty = pointer_type(function_type string_type [|int_type; int_type|])
+let llalloc =
+  define_global "hlvm_alloc" (const_null llalloc_ty) m
+
+let llfree_ty = pointer_type(function_type void_type [|string_type|])
 let llfree =
-  declare_function "hlvm_free"
-    (function_type void_type [|string_type|]) m
+  define_global "hlvm_free" (const_null llfree_ty) m
 
 let cc = CallConv.fast
 
@@ -237,9 +245,11 @@ class state func = object (self : 'self)
   method store a ns x = ignore(build_store x (self#gep a ns) self#bb)
   method malloc llty n =
     let size = build_trunc (size_of llty) int_type "" self#bb in
+    let llalloc = self#load llalloc [int 0] in
     let data = build_call llalloc [|n; size|] "" self#bb in
     self#bitcast data (pointer_type llty)
   method free x =
+    let llfree = self#load llfree [int 0] in
     ignore(build_call llfree [|x|] "" self#bb)
   method define_global x v = define_global x v m
   method mk s = {< blk = append_block s func >}
@@ -911,6 +921,7 @@ and mk_fun vars cc f args ty_ret body =
 
 (* A larger hash table improves performance on large heaps but degrades
    performance on small heaps. *)
+(*                 list  queens *)
 let q = 997    (* 20.94s 23.19s *)
 let q = 2047   (* 10.77s 22.57s *)
 let q = 4093   (*  6.18s 27.39s *)
@@ -941,6 +952,23 @@ let init() =
     defun vars' CallConv.c f_name ["", `Unit] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
+	 let str s =
+	   let str = state#define_global "str" (const_stringz s) in
+	   state#gep str [int32 0; int 0] in
+	 (* FIXME: We should check for a NULL pointer in case the dynamic
+	    load fails. *)
+	 let libruntime =
+	   state#call CallConv.c lldlopen [str "./libruntime.so"; int 1] in
+	 (* FIXME: We should check dlerror in case the required symbols are
+	    not found. *)
+	 state#store llalloc [int 0]
+	   (state#bitcast
+	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_alloc"])
+	      llalloc_ty);
+	 state#store llfree [int 0]
+	   (state#bitcast
+	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_free"])
+	      llfree_ty);
 	 let n = 1 lsl 25 in
 	 let body =
 	   compound
