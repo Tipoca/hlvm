@@ -664,7 +664,6 @@ let () =
 	 queens 8 @
 	 queens 9 @
 	 queens 10 @
-	 queens 11 @
 	 gc @
 	 []
      ))

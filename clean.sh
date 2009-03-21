@@ -1,1 +1,1 @@
-rm -f hlvm aout.* *.annot *.cm* *.o *~
+rm -f hlvm aout.* aoutopt.* *.annot *.cm* *.o *~ aout aoutopt libruntime.so

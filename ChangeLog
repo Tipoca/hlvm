@@ -1,3 +1,20 @@
+Sat Mar 21 17:42:31 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Memoized constant string literals.
+	* Fixed perf bug where all bound variables were being pushed onto the
+	shadow stack at the beginning of every function body instead of just
+	the function's arguments.
+	* Optimized array visit function to skip arrays that do not contain
+	any reference types.
+	* Implemented standalone compilation. All JIT executed functions are
+	called from a "main" function in the output aout.bc which the ./opt.sh
+	script compiles through LLVM's optimization passes into aoutopt. This
+	gives us some idea of how much performance would be gained by applying
+	LLVM's optimization passes if we had bindings for them.
+	* Moved timing code from the compiler into the generated code so our
+	standalone executable can be used for benchmarking.
+
+
 Fri Mar 13 02:42:33 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Switched from LLVM's malloc intrinsic to helper functions for alloc

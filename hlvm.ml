@@ -191,12 +191,13 @@ let lldlsym =
     (function_type string_type [|string_type; string_type|]) m
 
 let llalloc_ty = pointer_type(function_type string_type [|int_type; int_type|])
-let llalloc =
-  define_global "hlvm_alloc" (const_null llalloc_ty) m
+let llalloc = define_global "hlvm_alloc" (const_null llalloc_ty) m
 
 let llfree_ty = pointer_type(function_type void_type [|string_type|])
-let llfree =
-  define_global "hlvm_free" (const_null llfree_ty) m
+let llfree = define_global "hlvm_free" (const_null llfree_ty) m
+
+let lltime_ty = pointer_type(function_type double_type [||])
+let lltime = define_global "hlvm_time" (const_null lltime_ty) m
 
 let cc = CallConv.fast
 
@@ -275,6 +276,11 @@ class state func = object (self : 'self)
   method no_gc = {< gc_enabled = false >}
   method odepth = odepth
   method set_depth d = {< odepth = d >}
+  method int_of_ptr ptr = build_ptrtoint ptr int_type "" self#bb
+  method ptr_of_int n ty = build_ptrtoint n ty "" self#bb
+  method time =
+    let lltime = self#load lltime [int 0] in
+    build_call lltime [||] "" self#bb
 end
 
 (** Create a state object and save the current shadow stack depth. *)
@@ -309,9 +315,23 @@ let type_check err ty1 ty2 =
     invalid_arg
       (sprintf "%s: %a != %a" err Type.to_string ty1 Type.to_string ty2)
 
+let string_cache = Hashtbl.create 1
+
+let mk_string string =
+  try Hashtbl.find string_cache string with Not_found ->
+    let spec = define_global "buf" (const_stringz string) m in
+    Hashtbl.add string_cache string spec;
+    spec
+
+let eval_functions = ref []
+
+let run_function llf =
+  eval_functions := !eval_functions @ [llf];
+  ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee
+
 (** Compile an expression in the context of current vars into the given
     LLVM state. *)
-let rec expr vars state e =
+let rec expr vars (state: state) e =
   if !debug then
     printf "-> expr %s\n%!" (Expr.to_string () e);
   let state, (x, ty_x) as ret =
@@ -516,9 +536,7 @@ and expr_aux vars state = function
       let state = gc_root vars state ret ty_ret in
       state, (ret, ty_ret)
   | Printf(spec, args) ->
-      let spec =
-	let str = state#define_global "buf" (const_stringz spec) in
-	state#gep str [int32 0; int 0] in
+      let spec = state#gep (mk_string spec) [int32 0; int 0] in
       let state, (args, _) = exprs vars state args in
       let ext x =
 	if type_of x <> float_type then x else
@@ -594,7 +612,10 @@ and expr_aux vars state = function
   | AddressOf f ->
       let state, (f, ty_f) = expr vars state f in
       let ptr = extractvalue state f Ref.data in
-      let ptr = build_ptrtoint ptr int_type "" state#bb in
+      let ptr = state#int_of_ptr ptr in
+      (*
+	let ptr = build_ptrtoint ptr int_type "" state#bb in
+      *)
       state, (ptr, `Int)
   | Llvalue(v, ty) -> state, (v, ty)
   | Magic(f, ty) ->
@@ -642,17 +663,20 @@ and malloc state ty n =
 
 (** Register all reference types in the given value as live roots for the
     GC. *)
-and gc_root vars state v ty =
+and gc_root_aux vars state v ty =
   if !debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
   match ty with
   | `Unit | `Bool | `Int | `Float | `Function _ -> state
   | `Struct tys ->
       let f (i, state) ty =
-	i+1, gc_root vars state (extractvalue state v i) ty in
+	let v = lazy(extractvalue state (Lazy.force v) i) in
+	i+1, gc_root_aux vars state v ty in
       snd(List.fold_left f (0, state) tys)
   | `Array _  | `Reference ->
-      state#gc_root v
+      state#gc_root(Lazy.force v)
+
+and gc_root vars state v ty = gc_root_aux vars state (lazy v) ty
 
 and gc_alloc vars state v =
   if not state#gc_enabled then state else
@@ -712,7 +736,7 @@ and def vars = function
 	(fun vars state ->
 	   let state, (ps, ty_ps) =
 	     expr vars state
-	       (Struct(List.map (fun (s, _) -> Var s) vars.vals)) in
+	       (Struct(List.map (fun (s, _) -> Var s) args)) in
 	   let state = gc_root vars state ps ty_ps in
 	   let state, _ =
 	     expr vars state
@@ -744,7 +768,7 @@ and def vars = function
 	Llvm_analysis.assert_valid_function llvm_f;
 	llvm_f in
 
-      let f_name = "main" in
+      let f_name = "eval_expr" in
       let vars' =
 	defun vars CallConv.c f_name ["", `Unit] `Unit
 	  (fun vars state ->
@@ -754,6 +778,7 @@ and def vars = function
 	     let _ =
 	       state#call CallConv.c stackoverflow_install_handler
 		 [llvm_handler; stack; int size] in
+	     let t1 = Llvalue(state#time, `Float) in
 	     let f =
 	       compound
 		 [ Printf("- : <type> = ", []);
@@ -765,18 +790,15 @@ and def vars = function
 	       expr vars state
 		 (Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
 	     let state, _ = expr vars state (Apply(Var "gc", [])) in
+	     let t2 = Llvalue(state#time, `Float) in
+	     let state, _ =
+	       expr vars state (Printf("Took %fs\n", [t2 -: t1])) in
 	     let _ =
 	       state#call CallConv.c stackoverflow_deinstall_handler [] in
 	     return vars state Unit `Unit) in
-      printf "Writing bitcode\n%!";
-      ignore(Llvm_bitwriter.write_bitcode_file m "aout.bc");
-      printf "Evaluating\n%!";
       let t = Unix.gettimeofday() in
-      let _ =
-	let llvm_f, _ = List.assoc f_name vars'.vals in
-	ExecutionEngine.run_function llvm_f
-	  [|GenericValue.of_int int_type 0|] ee in
-      printf "Took %fs\n%!" (Unix.gettimeofday() -. t);
+      let llvm_f, _ = List.assoc f_name vars'.vals in
+      ignore(run_function llvm_f)
 
       vars
   | `Extern(_, _, `Struct _) ->
@@ -788,7 +810,7 @@ and def vars = function
 	let ty =
 	  function_type (lltype_of ty_ret)
 	    (Array.of_list (List.map lltype_of tys_arg)) in
-        declare_function f ty m in
+	declare_function f ty m in
       let ty = tys_arg, ty_ret in
       let llvm_f = define_function (uniq("vm_"^f)) (function_type_of ty) m in
       set_function_call_conv cc llvm_f;
@@ -837,21 +859,26 @@ and visit vars f v = function
 and def_visit_array vars ty =
   let f = "visit_array_"^Type.to_string () ty in
   let body, vars = visit vars (Var "g") (Get(Var "a", Var "i")) ty in
-  let llvisitaux =
-    let f = f^"aux" in
+  if body = Unit then
     mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
-		       "a", `Array ty;
-		       "i", `Int ] `Unit
-      (If(Var "i" =: Length(Var "a"), Unit,
-	  compound
-	    [body;
-	     Apply(Var f, [Var "g"; Var "a"; Var "i" +: Int 1])])) in
-  mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
-		     "a", `Reference ] `Unit
-    (Apply(Llvalue(llvisitaux, `Function([`Function([`Reference], `Unit);
-					  `Array ty;
-					  `Int], `Unit)),
-	   [Var "g"; Magic(Var "a", `Array ty); Int 0]))
+		       "a", `Reference ] `Unit
+      Unit
+  else
+    let llvisitaux =
+      let f = f^"aux" in
+      mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
+			 "a", `Array ty;
+			 "i", `Int ] `Unit
+	(If(Var "i" =: Length(Var "a"), Unit,
+	    compound
+	      [body;
+	       Apply(Var f, [Var "g"; Var "a"; Var "i" +: Int 1])])) in
+    mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
+		       "a", `Reference ] `Unit
+      (Apply(Llvalue(llvisitaux, `Function([`Function([`Reference], `Unit);
+					    `Array ty;
+					    `Int], `Unit)),
+	     [Var "g"; Magic(Var "a", `Array ty); Int 0]))
 
 (** Define a function to print a type constructor. *)
 and def_print vars name c ty =
@@ -905,8 +932,7 @@ and init_type name llty llvisit llprint =
 	 let state, _ = expr vars state (Store(llty, s)) in
 	 return vars state Unit `Unit) in
   let llvm_f, _ = List.assoc f vars.vals in
-  ignore(ExecutionEngine.run_function llvm_f
-	   [|GenericValue.of_int int_type 0|] ee)
+  ignore(run_function llvm_f)
 
 (** Create and memoize a function. Used to create visitor functions. *)
 and mk_fun vars cc f args ty_ret body =
@@ -955,10 +981,16 @@ let init() =
 	 let str s =
 	   let str = state#define_global "str" (const_stringz s) in
 	   state#gep str [int32 0; int 0] in
-	 (* FIXME: We should check for a NULL pointer in case the dynamic
-	    load fails. *)
 	 let libruntime =
 	   state#call CallConv.c lldlopen [str "./libruntime.so"; int 1] in
+	 let state, _ =
+	   let libruntime = state#int_of_ptr libruntime in
+	   expr vars state
+	     (If(Llvalue(libruntime, `Int) =: Int 0,
+		 compound
+		   [Printf("ERROR: libruntime.so not found\n", []);
+		    Exit(Int 1)],
+		 Unit)) in
 	 (* FIXME: We should check dlerror in case the required symbols are
 	    not found. *)
 	 state#store llalloc [int 0]
@@ -969,6 +1001,10 @@ let init() =
 	   (state#bitcast
 	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_free"])
 	      llfree_ty);
+	 state#store lltime [int 0]
+	   (state#bitcast
+	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_time"])
+	      lltime_ty);
 	 let n = 1 lsl 25 in
 	 let body =
 	   compound
@@ -984,8 +1020,7 @@ let init() =
 	 return vars state body `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
-    ExecutionEngine.run_function llvm_f
-      [|GenericValue.of_int int_type 0|] ee in
+    run_function llvm_f in
   vars
 
 (** Compile and run a list of definitions. *)
@@ -1184,4 +1219,14 @@ let compile_and_run defs =
 		   Store(quota, Int 4 *: Load(n_allocated, `Int))])) ] in
   let vars = List.fold_left def vars boot in
   let _ = List.fold_left def vars defs in
-  ()
+  let f_name = "main" in
+  let _ =
+    defun vars CallConv.c f_name ["", `Unit] `Unit
+      (fun vars state ->
+	 let state = state#no_gc in
+	 let call llf =
+	   ignore(state#call CallConv.c llf [int 0]) in
+	 List.iter call !eval_functions;
+	 return vars state Unit `Unit) in
+  Printf.printf "Writing bitcode\n%!";
+  ignore(Llvm_bitwriter.write_bitcode_file m "aout.bc")
