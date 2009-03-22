@@ -1,38 +1,38 @@
 (** Expressions of a first-order intermediate language. *)
-type 'state t =
+type t =
   | Unit
   | Bool of bool
   | Int of int
   | Float of float
-  | Struct of 'state t list
-  | GetValue of 'state t * int
+  | Struct of t list
+  | GetValue of t * int
   | Var of string
-  | Arith of [`Add|`Sub|`Mul|`Div|`Mod] * 'state t * 'state t
-  | Cmp of [`Lt|`Le|`Eq|`Ge|`Gt|`Ne] * 'state t * 'state t
-  | If of 'state t * 'state t * 'state t
-  | Let of string * 'state t * 'state t
-  | Alloc of 'state t * Type.t
-  | Length of 'state t
-  | Get of 'state t * 'state t
-  | Set of 'state t * 'state t * 'state t
-  | Apply of 'state t * 'state t list
-  | Printf of string * 'state t list
-  | IntOfFloat of 'state t
-  | FloatOfInt of 'state t
-  | Return of 'state t * Type.t
-  | Construct of string * 'state t
-  | IsType of 'state t * string
-  | Print of 'state t
-  | Exit of 'state t
+  | Arith of [`Add|`Sub|`Mul|`Div|`Mod] * t * t
+  | Cmp of [`Lt|`Le|`Eq|`Ge|`Gt|`Ne] * t * t
+  | If of t * t * t
+  | Let of string * t * t
+  | Alloc of t * Type.t
+  | Length of t
+  | Get of t * t
+  | Set of t * t * t
+  | Apply of t * t list
+  | Printf of string * t list
+  | IntOfFloat of t
+  | FloatOfInt of t
+  | Return of t * Type.t
+  | Construct of string * t
+  | IsType of t * string
+  | Print of t
+  | Exit of t
       (* Unsafe internals: *)
-  | AddressOf of 'state t
-  | Cast of 'state t * string
-  | Free of 'state t
+  | AddressOf of t
+  | Cast of t * string
+  | Free of t
   | Load of Llvm.llvalue * Type.t
-  | Store of Llvm.llvalue * 'state t
-  | Visit of 'state t
+  | Store of Llvm.llvalue * t
+  | Visit of t
   | Llvalue of Llvm.llvalue * Type.t
-  | Magic of 'state t * Type.t
+  | Magic of t * Type.t
 
 (** Helper operators. *)
 let ( <: ) f g = Cmp(`Lt, f, g)

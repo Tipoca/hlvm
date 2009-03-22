@@ -303,10 +303,10 @@ let uniq =
 exception Returned
 exception Handled of exn
 
-type 'a t =
-    [ `UnsafeFunction of string * (string * Type.t) list * Type.t * 'a Expr.t
-    | `Function of string * (string * Type.t) list * Type.t * 'a Expr.t
-    | `Expr of 'a Expr.t * Type.t
+type t =
+    [ `UnsafeFunction of string * (string * Type.t) list * Type.t * Expr.t
+    | `Function of string * (string * Type.t) list * Type.t * Expr.t
+    | `Expr of Expr.t * Type.t
     | `Extern of string * Type.t list * Type.t
     | `Type of string * Type.t ]
 
@@ -796,9 +796,8 @@ and def vars = function
 	     let _ =
 	       state#call CallConv.c stackoverflow_deinstall_handler [] in
 	     return vars state Unit `Unit) in
-      let t = Unix.gettimeofday() in
       let llvm_f, _ = List.assoc f_name vars'.vals in
-      ignore(run_function llvm_f)
+      ignore(run_function llvm_f);
 
       vars
   | `Extern(_, _, `Struct _) ->
@@ -1028,7 +1027,7 @@ let compile_and_run defs =
   let vars = init() in
   let printf(x, y) =
     if !debug then Printf(x, y) else Unit in
-  let boot : 'a t list =
+  let boot : t list =
     let append ty =
       [ `UnsafeFunction("aux", ["a", `Array ty;
 				"b", `Array ty;

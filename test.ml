@@ -1,7 +1,7 @@
 open Expr
 
 (** Integer Fibonacci benchmark *)
-let fib : Hlvm.state Hlvm.t list =
+let fib : Hlvm.t list =
   let n = Var "n" in
   [`Function
      ("fib", ["n", `Int], `Int,
@@ -12,7 +12,7 @@ let fib : Hlvm.state Hlvm.t list =
    `Expr(Apply(Var "fib", [Int 40]), `Int)]
 
 (** Float-based Fibonacci benchmark *)
-let ffib : Hlvm.state Hlvm.t list =
+let ffib : Hlvm.t list =
   let n = Var "n" in
   [`Function
      ("fib", ["n", `Float], `Float,
@@ -35,7 +35,7 @@ let fill ty =
 	 Unit))]
 
 (** Sieve of Eratosthenes. *)
-let sieve i : Hlvm.state Hlvm.t list =
+let sieve i : Hlvm.t list =
   fill `Bool @
     [`Function
        ("last", ["a", `Array `Bool; "i", `Int], `Int,
@@ -66,7 +66,7 @@ let sieve i : Hlvm.state Hlvm.t list =
 		   Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ]),
 	   `Int)]
 
-let mandelbrot n : Hlvm.state Hlvm.t list =
+let mandelbrot n : Hlvm.t list =
   [`Function
      ("pixel", ["n", `Int;
 		"zr", `Float; "zi", `Float;
@@ -104,7 +104,7 @@ let mandelbrot n : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
 
-let mandelbrot2 n : Hlvm.state Hlvm.t list =
+let mandelbrot2 n : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
   let re z = GetValue(Var z, 0) in
   let im z = GetValue(Var z, 1) in
@@ -151,7 +151,7 @@ let mandelbrot2 n : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
 
-let mandelbrot3 n : Hlvm.state Hlvm.t list =
+let mandelbrot3 n : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
   let re z = GetValue(Var z, 0) in
   let im z = GetValue(Var z, 1) in
@@ -203,7 +203,7 @@ let mandelbrot3 n : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
 
-let tco n : Hlvm.state Hlvm.t list =
+let tco n : Hlvm.t list =
   [`Function("even", ["odd", `Function([`Int], `Int); "n", `Int], `Int,
              Apply(Var "odd", [Var "n" +: Int 1]));
 
@@ -214,7 +214,7 @@ let tco n : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "even", [Var "odd"; Int 0]), `Int)]
 
-let tuples : Hlvm.state Hlvm.t list =
+let tuples : Hlvm.t list =
   [`Function("id", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
 	     Var "s");
 
@@ -227,7 +227,7 @@ let tuples : Hlvm.state Hlvm.t list =
 
    `Expr(Apply(Var "rev", [Struct[Int 2; Float 3.4]]), `Struct[`Float; `Int])]
 
-let trig : Hlvm.state Hlvm.t list =
+let trig : Hlvm.t list =
   let triple = `Struct[`Float; `Float; `Float] in
   [`Extern("sin", [`Float], `Float);
    `Extern("cos", [`Float], `Float);
@@ -245,7 +245,7 @@ let trig : Hlvm.state Hlvm.t list =
   HLVM:  2.42s substitute "f"
   HLVM:  2.29s fully inlined and reduced fold
 *)
-let fold n : Hlvm.state Hlvm.t list =
+let fold n : Hlvm.t list =
   let fold ty1 ty2 =
     [`Function("fold_aux", ["n", `Int;
 			    "f", `Function([ty1; ty2], ty1);
@@ -277,7 +277,7 @@ let fold n : Hlvm.state Hlvm.t list =
 			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]),
 	   `Struct[`Float; `Float])]
 
-let fold n : Hlvm.state Hlvm.t list =
+let fold n : Hlvm.t list =
   fill `Float @
     [`Function("fold_aux", ["n", `Int;
 			    "y", `Struct[`Float; `Float];
@@ -326,7 +326,7 @@ let list_fold_left a b =
 		      Apply(Var "f", [Var "x"; Var "h"]);
 		      Var "t"])))
 
-let list n : Hlvm.state Hlvm.t list =
+let list n : Hlvm.t list =
   ty_list `Int @
     [ `Function("add", ["n", `Int; "m", `Int], `Int, Var "n" +: Var "m");
       
@@ -362,7 +362,7 @@ let ty_closure(ty1, ty2) =
 let apply(f, x) =
   Apply(GetValue(f, 0), [GetValue(f, 1); x])
 
-let curry : Hlvm.state Hlvm.t list =
+let curry : Hlvm.t list =
   let ty_ret = `Struct[`Int; `Float] in
   [`Function("f_uncurried", ["x", `Int; "y", `Float], ty_ret,
 	     Struct[Var "x"; Var "y"]);
@@ -379,7 +379,7 @@ let curry : Hlvm.state Hlvm.t list =
 	     Struct[apply(Var "g", Float 2.3);
 		    apply(Var "g", Float 3.4)]), `Struct[ty_ret; ty_ret])]
 
-let list_filter ty : Hlvm.state Hlvm.t =
+let list_filter ty : Hlvm.t =
   `Function("filter", ["pred", ty_closure(ty, `Bool);
 		       "list", `Reference], `Reference,
 	    cond_list "list" "h" "t"
@@ -389,7 +389,7 @@ let list_filter ty : Hlvm.state Hlvm.t =
 		      cons (Var "h") (Var "t"),
 		      Var "t"))))
 
-let list_length ty : Hlvm.state Hlvm.t =
+let list_length ty : Hlvm.t =
   `Function("length", ["list", `Reference], `Int,
 	    cond_list "list" "h" "t"
 	      (Int 0)
@@ -478,8 +478,8 @@ let gc =
 				  Alloc(Length(Var "a") +: Int 1, ty);
 				  Int 0;
 				  Var "x"])) ] in
-  let q = 2047 in
-  let n = 10000 in
+  let q = 16381 in
+  let n = 1000000 in
   let ty_bkt = `Array(`Struct[`Reference; `Bool]) in
   append (`Struct[`Reference; `Bool]) @
     fill(`Struct[`Int; ty_bkt]) @
@@ -628,7 +628,7 @@ let gc =
 	    `Array `Int) ]
 
 (** Insert debug information at the beginning of each function. *)
-let rec trace : Hlvm.state Hlvm.t list -> Hlvm.state Hlvm.t list = function
+let rec trace : Hlvm.t list -> Hlvm.t list = function
   | `Function(f, args, ty_ret, body)::t ->
       `Function
 	(f, args, ty_ret,
