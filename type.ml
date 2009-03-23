@@ -18,7 +18,7 @@ let rec list_to_string f sep () = function
   | [h] -> f () h
   | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
 
-let rec to_string () = function
+let rec to_string () : t -> string = function
   | `Unit -> "`Unit"
   | `Bool -> "`Bool"
   | `Int -> "`Int"

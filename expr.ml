@@ -1,38 +1,77 @@
 (** Expressions of a first-order intermediate language. *)
 type t =
   | Unit
+      (** The value () of the type unit. *)
   | Bool of bool
+      (** A literal boolean value. *)
   | Int of int
+      (** A literal native int value. *)
   | Float of float
+      (** A literal 64-bit floating point value. *)
   | Struct of t list
+      (** A struct literal. *)
   | GetValue of t * int
+      (** Extract a field from a struct. *)
   | Var of string
+      (** A variable. *)
   | Arith of [`Add|`Sub|`Mul|`Div|`Mod] * t * t
+      (** A binary arithmetic operation. *)
   | Cmp of [`Lt|`Le|`Eq|`Ge|`Gt|`Ne] * t * t
+      (** A comparison. *)
   | If of t * t * t
+      (** An "if" expression. *)
   | Let of string * t * t
+      (** Evaluate the first expression, bind the resulting value to the given
+	  variable name and evaluate the last expression. *)
   | Alloc of t * Type.t
+      (** Allocate an array to store the given number of elements of the given
+	  type. The array is initialized to all-bits zero. *)
   | Length of t
+      (** Find the length of the given array. *)
   | Get of t * t
+      (** Get(a, i) gets the element at index "i" from the array "a". *)
   | Set of t * t * t
+      (** Set(a, i, x) sets the element at index "i" in the array "a" to
+	  "x". *)
   | Apply of t * t list
+      (** Applying the given function pointer to the given list of
+	  arguments. *)
   | Printf of string * t list
+      (** Call C printf (unsafe). *)
   | IntOfFloat of t
+      (** Convert a float to an int. *)
   | FloatOfInt of t
-  | Return of t * Type.t
+      (** Convert an int to a float. *)
   | Construct of string * t
+      (** Construct a boxed value. *)
   | IsType of t * string
+      (** Check the type of a value against the type with the given name. *)
   | Print of t
+      (** Generic printing of any value. *)
   | Exit of t
-      (* Unsafe internals: *)
+      (** Call the C "exit" function. *)
   | AddressOf of t
+      (** For internal use only. Return the address of the given reference
+	  type as a native integer. *)
   | Cast of t * string
+      (** Cast the given reference value to the given type, returning the
+	  argument of the type constructor (unsafe). *)
   | Free of t
+      (** For internal use only. Deallocate the given value. *)
   | Load of Llvm.llvalue * Type.t
+      (** For internal use only. Load a value from an LLVM global variable. *)
   | Store of Llvm.llvalue * t
+      (** For internal use only. Store a value to an LLVM global variable. *)
   | Visit of t
+      (** For internal use only. Obtain the GC visit function associated with
+	  the type of the given value. *)
   | Llvalue of Llvm.llvalue * Type.t
+      (** For internal use only. A literal LLVM value. *)
   | Magic of t * Type.t
+      (** For internal use only. Convert between the two kinds of reference
+	  types: arrays and boxed values. *)
+  | Return of t * Type.t
+      (** For internal use only. Used to propagate tail calls. *)
 
 (** Helper operators. *)
 let ( <: ) f g = Cmp(`Lt, f, g)

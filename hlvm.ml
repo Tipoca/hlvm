@@ -7,6 +7,7 @@ open Llvm_analysis
 
 open Expr
 
+(** Auxiliary list-related functions. *)
 module List = struct
   include List
 
@@ -27,23 +28,30 @@ module List = struct
     | x::xs -> x::sep::between sep xs
 end
 
+(** Global boolean to enable debug output in both the compiler and the
+    generated code. Enabled by the command-line argument "--debug". *)
 let debug = ref false
 
+(** Binding to the LLVM extractvalue instruction. *)
 external build_extractvalue :
   llvalue -> int -> string -> llbuilder -> llvalue =
       "llvm_build_extractvalue"
       
+(** Binding to the LLVM insertvalue instruction. *)
 external build_insertvalue :
   llvalue -> llvalue -> int -> string -> llbuilder -> llvalue =
       "llvm_build_insertvalue"
 
+(** Binding to a function that enables TCO in LLVM. *)
 external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
 
+(** Create an aggregate register (a struct) containing the given llvalues. *)
 let mk_struct state vs =
   let llty = struct_type (Array.of_list(List.map type_of vs)) in
   let aux (i, s) x = i+1, build_insertvalue s x i "" state#bb in
   snd(List.fold_left aux (0, undef llty) vs)
 
+(** Turn on TCO in LLVM. *)
 let () = enable_tail_call_opt()
 
 let extractvalue state s i =
@@ -58,23 +66,33 @@ let int_type = match Sys.word_size with
   | 64 -> i64_type
   | _ -> failwith "Unknown word size"
 
+(** Is the given type represented by a struct. *)
 let is_struct = function
   | `Array _ | `Struct _ | `Reference -> true
   | `Unit | `Bool | `Int | `Float | `Function _ -> false
 
+(** Is the given type a reference type. *)
 let is_ref_type = function
   | `Array _ | `Reference -> true
   | `Struct _ | `Unit | `Bool | `Int | `Float | `Function _ -> false
 
+(** Layout of a reference type. *)
 module Ref = struct
-(** Representation of reference types. *)
+  (** Run-time representation of values of reference types as an LLVM type. *)
   let lltype =
     struct_type[|string_type; int_type; string_type|]
 
+  (** Index of the field containing the pointer to the run-time type. *)
   let llty = 0
+
+  (** Index of the field containing the int metadata. *)
   let tag = 1
+
+  (** Index of the field containing the pointer to allocated data. *)
   let data = 2
 
+  (** Construct a reference type with the given run-time type, metadata and
+      allocated data. *)
   let mk state llty tag data =
     mk_struct state [ state#bitcast llty string_type;
 		      tag;
@@ -120,12 +138,19 @@ end
 let print_type_of v =
   printf "%s\n%!" (string_of_lltype(type_of v))
 
-(* Create constants. *)
+(** Create an LLVM native int. *)
 let int n = const_int int_type n
+
+(** Create an LLVM 32-bit int. *)
 let int32 n = const_int i32_type n
+
+(** Create an LLVM 64-bit float. *)
 let float64 x = const_float (lltype_of `Float) x
+
+(** LLVM representation of the NULL pointer. *)
 let null = const_null string_type
 
+(** Search for a binding and give a comprehensible error if it is not found. *)
 let find k kvs =
   try List.assoc k kvs with Not_found ->
     eprintf "Unknown '%s'\n%!" k;
@@ -173,52 +198,73 @@ let n_allocated = define_global "n_allocated" (int 0) m
 (** Number of allocations required to incur a garbage collection. *)
 let quota = define_global "quota" (int 0) m
 
+(** LLVM declaration of C's putchar function. *)
 let llputchar =
   declare_function "putchar" (function_type int_type [|int_type|]) m
 
+(** LLVM declaration of C's exit function. *)
 let llexit =
   declare_function "exit" (function_type void_type [|int_type|]) m
 
+(** LLVM declaration of C's printf function. *)
 let llprintf =
   declare_function "printf" (var_arg_function_type int_type [|string_type|]) m
 
+(** LLVM declaration of libdl's dlopen function. *)
 let lldlopen =
   declare_function "dlopen"
     (function_type string_type [|string_type; int_type|]) m
 
+(** LLVM declaration of libdl's dlsym function. *)
 let lldlsym =
   declare_function "dlsym"
     (function_type string_type [|string_type; string_type|]) m
 
+(** LLVM type of the hlvm_alloc function. *)
 let llalloc_ty = pointer_type(function_type string_type [|int_type; int_type|])
+
+(** LLVM global to store the dynamically-loaded hlvm_alloc function. *)
 let llalloc = define_global "hlvm_alloc" (const_null llalloc_ty) m
 
+(** LLVM type of the hlvm_free function. *)
 let llfree_ty = pointer_type(function_type void_type [|string_type|])
+
+(** LLVM global to store the dynamically-loaded hlvm_free function. *)
 let llfree = define_global "hlvm_free" (const_null llfree_ty) m
 
+(** LLVM type of the hlvm_time function. *)
 let lltime_ty = pointer_type(function_type double_type [||])
+
+(** LLVM global to store the dynamically-loaded hlvm_time function. *)
 let lltime = define_global "hlvm_time" (const_null lltime_ty) m
 
+(** Default calling convention used by HLVM. *)
 let cc = CallConv.fast
 
+(** Mapping from bound variable names to their LLVM values and HLVM types. *)
 type vars =
     { vals: (string * (llvalue * Type.t)) list }
 
+(** Default variable bindings. *)
 let vars = { vals = [] }
 
-(** Container of internal types such as wrapper reference types for arrays. *)
+(** Bound types types (including internal types such as wrapper reference
+    types for arrays). *)
 let types = Hashtbl.create 1
 
 (** Container of internal functions such as visitors to traverse the heap. *)
 let functions = Hashtbl.create 1
 
+(** Search for a type with the given name from the  *)
 let find_type name =
   try Hashtbl.find types name with Not_found as e ->
     eprintf "Type '%s' not found\n%!" name;
     raise e
 
+(** Bind a new variable. *)
 let add_val x vars = { vals = x :: vars.vals }
 
+(** Push a reference type onto the shadow stack. *)
 let push self stack depth v =
   if !debug then
     printf "state#push\n%!";
@@ -228,56 +274,110 @@ let push self stack depth v =
   self#store data [d] v;
   self#store depth [int 0] (build_add (int 1) d "" self#bb)
 
+(** Restore the shadow stack by resetting its depth to an older value. *)
 let gc_restore self =
   if !debug then
     printf "state#restore\n%!";
   self#store stack_depth [int 0] self#odepth
 
-(** Create a state object. *)
+(** Create a state object that encapsulates our interface for emitting LLVM
+    instructions. *)
 class state func = object (self : 'self)
   val blk = entry_block func
   val odepth = int 0
   val gc_enabled = true
   val roots = false
+
+  (** Get the current LLVM instruction block. *)
   method blk = blk
+
+  (** Get an LLVM instruction builder to insert instructions at the end of the
+      current LLVM instruction block. *)
   method bb = builder_at_end blk
+
+  (** Issue an LLVM get element pointer instruction. *)
   method gep a ns = build_gep a (Array.of_list ns) "" self#bb
+
+  (** Issue an LLVM load instruction. *)
   method load a ns = build_load (self#gep a ns) "" self#bb
+
+  (** Issue an LLVM store instruction. *)
   method store a ns x = ignore(build_store x (self#gep a ns) self#bb)
+
+  (** Issue LLVM instructions to call the hlvm_alloc function. *)
   method malloc llty n =
     let size = build_trunc (size_of llty) int_type "" self#bb in
     let llalloc = self#load llalloc [int 0] in
     let data = build_call llalloc [|n; size|] "" self#bb in
     self#bitcast data (pointer_type llty)
+
+  (** Issue LLVM instructions to call the hlvm_free function. *)
   method free x =
     let llfree = self#load llfree [int 0] in
     ignore(build_call llfree [|x|] "" self#bb)
+
+  (** Define a global LLVM variable. *)
   method define_global x v = define_global x v m
-  method mk s = {< blk = append_block s func >}
+
+  (** Create a new instruction block and return a new state that will insert
+      instructions into it. *)
+  method mk s = ({< blk = append_block s func >} : 'self)
+
+  (** Issue an LLVM return instruction. *)
   method ret v = ignore(build_ret v self#bb)
+
+  (** Issue an LLVM unconditional branch instruction. *)
   method br (s: 'self) = ignore(build_br s#blk self#bb)
+
+  (** Issue an LLVM bitcast instruction. *)
   method bitcast v ty = build_bitcast v ty "" self#bb
+
+  (** Issue an LLVM call instruction using the given calling convention. *)
   method call cc f args =
     let call = build_call f (Array.of_list args) "" self#bb in
     set_instruction_call_conv cc call;
     call
+
+  (** Get the LLVM value of the pointer to the return struct. *)
   method sret = param func 0
+
+  (** Issue an LLVM alloca instruction to allocate on the stack. *)
   method alloca ty =
     build_alloca ty "" (builder_at_end(entry_block func))
+
+  (** Are we emitting code to keep the GC informed. *)
   method gc_enabled = gc_enabled
+
+  (** Register the given values as a global root for the GC. *)
   method gc_root v =
     if not gc_enabled then self else begin
       push self stack stack_depth v;
       {< roots = true >}
     end
+
+  (** Restore the shadow stack depth to the value it was when this function
+      was entered. *)
   method gc_restore() =
     if gc_enabled && roots then
       gc_restore self
+
+  (** Return a "state" object that will not inject instructions to keep the
+      GC informed. *)
   method no_gc = {< gc_enabled = false >}
+
+  (** Depth the shadow stack was at when this function was entered. *)
   method odepth = odepth
+
+  (** Prepare to reset the shadow stack depth to this value. *)
   method set_depth d = {< odepth = d >}
+
+  (** Issue an LLVM ptrtoint instruction. *)
   method int_of_ptr ptr = build_ptrtoint ptr int_type "" self#bb
-  method ptr_of_int n ty = build_ptrtoint n ty "" self#bb
+
+  (** Issue an LLVM inttoptr instruction. *)
+  method ptr_of_int n ty = build_inttoptr n ty "" self#bb
+
+  (** Issue LLVM instructions to call the hlvm_time function. *)
   method time =
     let lltime = self#load lltime [int 0] in
     build_call lltime [||] "" self#bb
@@ -300,9 +400,10 @@ let uniq =
       s in
   aux
 
+(** Exception raised after the return expression is compiled. *)
 exception Returned
-exception Handled of exn
 
+(** Top-level definitions. *)
 type t =
     [ `UnsafeFunction of string * (string * Type.t) list * Type.t * Expr.t
     | `Function of string * (string * Type.t) list * Type.t * Expr.t
@@ -310,21 +411,27 @@ type t =
     | `Extern of string * Type.t list * Type.t
     | `Type of string * Type.t ]
 
+(** Helper function for type checking. *)
 let type_check err ty1 ty2 =
   if not(Type.eq ty1 ty2) then
     invalid_arg
       (sprintf "%s: %a != %a" err Type.to_string ty1 Type.to_string ty2)
 
+(** Constant string literals are memoized here. *)
 let string_cache = Hashtbl.create 1
 
+(** Memoize a string. *)
 let mk_string string =
   try Hashtbl.find string_cache string with Not_found ->
     let spec = define_global "buf" (const_stringz string) m in
     Hashtbl.add string_cache string spec;
     spec
 
+(** List of functions that have been evaluated. The "main" function generated
+    for standalone computation calls each of these functions in turn. *)
 let eval_functions = ref []
 
+(** Register a function and execute it. *)
 let run_function llf =
   eval_functions := !eval_functions @ [llf];
   ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee
@@ -368,7 +475,7 @@ and expr_aux vars state = function
 	match ty_x with
 	| `Unit -> state, Ref.mk state llty (int 0) null
 	| _ ->
-	    let state, px = malloc state (lltype_of ty_x) (int 1) in
+	    let px = state#malloc (lltype_of ty_x) (int 1) in
 	    state#store px [int 0] x;
 	    let s = Ref.mk state llty (int 0) px in
 	    let state = gc_root vars state s `Reference in
@@ -456,7 +563,7 @@ and expr_aux vars state = function
   | Alloc(n, ty) ->
       let state, (n, ty_n) = expr vars state n in
       assert(Type.eq ty_n `Int);
-      let state, data = malloc state (lltype_of ty) n in
+      let data = state#malloc (lltype_of ty) n in
       let a, ty_a = Ref.mk state (mk_array_type ty) n data, `Array ty in
       let state = gc_root vars state a ty_a in
       let state = gc_alloc vars state a in
@@ -635,21 +742,30 @@ and expr_aux vars state = function
       state#gc_restore();
       state#ret f;
       raise Returned
+
+(** Compile two expressions. *)
 and expr2 vars state f g =
   let state, f = expr vars state f in
   let state, g = expr vars state g in
   state, f, g
+
+(** Compile three expressions. *)
 and expr3 vars state f g h =
   let state, f = expr vars state f in
   let state, g = expr vars state g in
   let state, h = expr vars state h in
   state, f, g, h
+
+(** Compile a list of expressions. *)
 and exprs vars state fs =
   let aux (state, rfs, rtys_f) f =
     let state, (f, ty_f) = expr vars state f in
     state, f::rfs, ty_f::rtys_f in
   let state, rfs, rtys_f = List.fold_left aux (state, [], []) fs in
   state, (List.rev rfs, List.rev rtys_f)
+
+(** Compile an expression and return from it, marking any calls in tail
+    position as tail calls. *)
 and return vars state f ty_f =
   try
     let _ = expr vars state (Return(f, ty_f)) in
@@ -657,12 +773,6 @@ and return vars state f ty_f =
   with Returned ->
     ()
 
-and malloc state ty n =
-  let data = state#malloc ty n in
-  state, data
-
-(** Register all reference types in the given value as live roots for the
-    GC. *)
 and gc_root_aux vars state v ty =
   if !debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
@@ -676,8 +786,11 @@ and gc_root_aux vars state v ty =
   | `Array _  | `Reference ->
       state#gc_root(Lazy.force v)
 
+(** Register all reference types in the given value as live roots for the
+    GC. *)
 and gc_root vars state v ty = gc_root_aux vars state (lazy v) ty
 
+(** Register an allocated value if necessary. *)
 and gc_alloc vars state v =
   if not state#gc_enabled then state else
     let state, _ =
@@ -844,6 +957,8 @@ and def_visit vars name c ty =
   let llvisit, _ = List.assoc f vars.vals in
   llvisit
 
+(** Generate an expression that applies the function "f" to every value of a
+    reference type in the value "v". *)
 and visit vars f v = function
   | `Unit | `Bool | `Int | `Float | `Function _ -> Unit, vars
   | `Struct tys ->
@@ -855,6 +970,8 @@ and visit vars f v = function
   | `Array _ -> Apply(f, [Magic(v, `Reference)]), vars
   | `Reference -> Apply(f, [v]), vars
 
+(** Define a function that visits every value of a reference type in an
+    array. *)
 and def_visit_array vars ty =
   let f = "visit_array_"^Type.to_string () ty in
   let body, vars = visit vars (Var "g") (Get(Var "a", Var "i")) ty in
@@ -879,7 +996,7 @@ and def_visit_array vars ty =
 					    `Int], `Unit)),
 	     [Var "g"; Magic(Var "a", `Array ty); Int 0]))
 
-(** Define a function to print a type constructor. *)
+(** Define a function to print a boxed value. *)
 and def_print vars name c ty =
   let f = "print_" ^ name in
   mk_fun vars cc f ["x", `Reference] `Unit
@@ -892,7 +1009,7 @@ and def_print_array vars ty =
   let f = "print_array_" ^ Type.to_string () ty in
   mk_fun vars cc f ["x", `Reference] `Unit (Print(Magic(Var "x", `Array ty)))
 
-(** Create and memoize a type. Used to create wrapper reference types
+(** Create and memoize a reference type. Used to create wrapper reference types
     for arrays. *)
 and mk_type vars ty =
   let name = "Box("^Type.to_string () ty^")" in
@@ -903,6 +1020,7 @@ and mk_type vars ty =
     let llty, _ = find_type name in
     llty
 
+(** Create and memoize an array type. *)
 and mk_array_type ty =
   if !debug then
     printf "mk_array_type %s\n%!" (Type.to_string () ty);
@@ -915,6 +1033,7 @@ and mk_array_type ty =
     init_type name llty llvisit llprint;
     llty
 
+(** Compile and run code to initialize the contents of a new type. *)
 and init_type name llty llvisit llprint =
   if !debug then
     printf "init_type %s\n%!" name;
@@ -943,7 +1062,7 @@ and mk_fun vars cc f args ty_ret body =
     let llty, _ = find f vars.vals in
     Hashtbl.add functions f llty;
     llty
-
+(*
 (* A larger hash table improves performance on large heaps but degrades
    performance on small heaps. *)
 (*                 list  queens *)
@@ -954,10 +1073,14 @@ let q = 8191   (*  3.96s 30.78s *)
 let q = 9973   (*  3.62s 31.19s *)
 let q = 30011  (*  2.54s 50.18s *)
 let q = 524287 (*  2.16s 74.92s *)
-
+*)
+(** Number of buckets in the hash table used by the GC. *)
 let q = 16381  (*  2.95s 36.65s *)
 
+(** Type of a hash table bucket. *)
 let ty_bkt = `Array(`Struct[`Reference; `Bool])
+
+(** Unsafe function to fill an array. *)
 let fill ty =
   `UnsafeFunction
     ("fill", [ "a", `Array ty;
@@ -969,8 +1092,8 @@ let fill ty =
 	    Apply(Var "fill", [Var "a"; Var "x"; Var "i" +: Int 1]) ],
 	Unit))
 
+(** Dynamically load the runtime and initialize the shadow stack and GC. *)
 let init() =
-  (* Initialize the shadow stack and GC. *)
   let f_name = "init_runtime" in
   let vars' = def vars (fill(`Struct[`Int; ty_bkt])) in
   let vars' =
@@ -1022,7 +1145,7 @@ let init() =
     run_function llvm_f in
   vars
 
-(** Compile and run a list of definitions. *)
+(** Compile the GC and compile and run a list of definitions. *)
 let compile_and_run defs =
   let vars = init() in
   let printf(x, y) =
