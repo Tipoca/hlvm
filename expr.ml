@@ -178,3 +178,50 @@ let rec to_string () = function
   | Magic(f, ty) ->
       sprintf "Magic(%a, %a)" to_string f Type.to_string ty
 and to_strings sep = list_to_string to_string sep
+
+let rec rewrite r = function
+  | Struct es -> Struct(List.map r es)
+  | GetValue(e, i) -> GetValue(r e, i)
+  | Arith(op, f, g) -> Arith(op, r f, r g)
+  | Cmp(op, f, g) -> Cmp(op, r f, r g)
+  | If(p, t, f) -> If(r p, r t, r f)
+  | Let(x, body, rest) -> Let(x, r body, r rest)
+  | Alloc(n, ty) -> Alloc(r n, ty)
+  | Length e -> Length(r e)
+  | Get(a, i) -> Get(r a, r i)
+  | Set(a, i, x) -> Set(r a, r i, r x)
+  | Apply(f, xs) -> Apply(r f, List.map r xs)
+  | Printf(s, xs) -> Printf(s, List.map r xs)
+  | IntOfFloat x -> IntOfFloat(r x)
+  | FloatOfInt x -> FloatOfInt(r x)
+  | Construct(c, v) -> Construct(c, r v)
+  | IsType(v, c) -> IsType(r v, c)
+  | Print e -> Print(r e)
+  | Exit x -> Exit(r x)
+  | AddressOf x -> AddressOf(r x)
+  | Cast(v, c) -> Cast(r v, c)
+  | Free x -> Free(r x)
+  | Return(x, ty) -> Return(r x, ty)
+  | Visit x -> Visit(r x)
+  | Magic(v, ty) -> Magic(r v, ty)
+
+  | Unit
+  | Bool _
+  | Int _
+  | Float _
+  | Var _
+  | Load _
+  | Store _
+  | Llvalue _ as e -> e
+
+let rec unroll_rule f params body = function
+  | Let(x, body, rest) as e when x=f -> e
+  | Apply(Var g, args) when f=g ->
+      let rec aux (i, t) param =
+	i+1, Let(param, GetValue(Var " args", i), t) in
+      let _, body = List.fold_left aux (0, body) params in
+      Let(" args", Struct args, body)
+  | e -> rewrite (unroll_rule f params body) e
+
+let unroll f args body =
+  rewrite (unroll_rule f (List.map fst args) body) body

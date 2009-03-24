@@ -841,6 +841,8 @@ and def vars = function
       if !debug then
 	eprintf "def %s\n%!" f;
 
+      let body = Expr.unroll f args (Expr.unroll f args body) in
+
       defun vars cc f args ty_ret
 	(fun vars state ->
 	   let state = state#no_gc in
@@ -848,6 +850,8 @@ and def vars = function
   | `Function(f, args, ty_ret, body) ->
       if !debug then
 	eprintf "def %s\n%!" f;
+
+      let body = Expr.unroll f args (Expr.unroll f args body) in
 
       defun vars cc f args ty_ret
 	(fun vars state ->
@@ -1339,54 +1343,6 @@ let boot : t list =
 		 printf("GC done.\n", []);
 		 Store(quota,
 		       Int 8192 +: Int 2 *: Load(n_allocated, `Int))])) ]
-
-(*
-type rule = Rule of (rule -> Expr.t -> Expr.t)
-
-let rec rewrite (Rule rule) = function
-  | `Struct es -> rule(fun rule -> `Struct(List.map (rewrite rule) es))
-  | e -> e
-  | GetValue(e, i) -> GetValue(rewrite rule e, i)
-  | Arith(op, f, g) -> Arith(op, rewrite 
-  | Cmp of [`Lt|`Le|`Eq|`Ge|`Gt|`Ne] * t * t
-  | If of t * t * t
-  | Let of string * t * t
-  | Alloc of t * Type.t
-  | Length of t
-  | Get of t * t
-  | Set of t * t * t
-  | Apply of t * t list
-  | Printf of string * t list
-  | IntOfFloat of t
-  | FloatOfInt of t
-  | Construct of string * t
-  | IsType of t * string
-  | Print of t
-  | Exit of t
-  | AddressOf of t
-  | Cast of t * string
-  | Free of t
-  | Return of t * Type.t
-
-  | Unit
-  | Bool of bool
-  | Int of int
-  | Float of float
-  | Var of string
-  | Load of Llvm.llvalue * Type.t
-  | Store of Llvm.llvalue * t
-  | Visit of t
-  | Llvalue of Llvm.llvalue * Type.t
-  | Magic of t * Type.t
-
-let unroll = function
-  | `Function(f, params, ty_ret, body) ->
-      let rule k =
-	k (function
-	     | Let(x, body, rest) when x=f -> ) in
-      `Function(f, params, ty_ret, unroll_aux f params body)
-  | stmt -> stmt
-*)
 
 (** Compile the GC and compile and run a list of definitions. *)
 let compile_and_run defs =
