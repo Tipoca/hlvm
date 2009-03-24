@@ -704,8 +704,12 @@ and expr_aux vars state = function
       end
   | Free f ->
       let state, (f, ty_f) = expr vars state f in
-      assert(is_ref_type ty_f);
-      state#free (extractvalue state f Ref.data);
+      let data = match ty_f with
+	| `Array _ | `Reference ->
+	    extractvalue state f Ref.data
+	| `Int -> state#ptr_of_int f string_type
+	| _ -> assert false in
+      state#free data;
       state, (int 0, `Unit)
   | Exit f ->
       let state, (f, ty_f) = expr vars state f in
@@ -1078,7 +1082,7 @@ let q = 524287 (*  2.16s 74.92s *)
 let q = 16381  (*  2.95s 36.65s *)
 
 (** Type of a hash table bucket. *)
-let ty_bkt = `Array(`Struct[`Reference; `Bool])
+let ty_bkt = `Array(`Struct[`Int; `Bool])
 
 (** Unsafe function to fill an array. *)
 let fill ty =
@@ -1135,9 +1139,7 @@ let init() =
 	       Store(allocated, Alloc(Int q, `Struct[`Int; ty_bkt]));
 	       Apply(Var "fill",
 		     [ Load(allocated, `Array(`Struct[`Int; ty_bkt]));
-		       Struct[Int 0;
-			      Alloc(Int 0,
-				    `Struct[`Reference; `Bool])];
+		       Struct[Int 0; Alloc(Int 0, `Struct[`Int; `Bool])];
 		       Int 0 ]) ] in
 	 return vars state body `Unit) in
   let _ =
@@ -1145,200 +1147,250 @@ let init() =
     run_function llvm_f in
   vars
 
+let append ty =
+  [ `UnsafeFunction("aux", ["a", `Array ty;
+			    "b", `Array ty;
+			    "i", `Int;
+			    "x", ty], `Array ty,
+		    If(Var "i" <: Length(Var "a"),
+		       compound
+			 [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
+			   Apply(Var "aux", [Var "a";
+					     Var "b";
+					     Var "i" +: Int 1;
+					     Var "x"]) ],
+		       compound
+			 [ Set(Var "b", Var "i", Var "x");
+			   If(Var "i" >: Int 1, Free(Var "a"), Unit);
+			   Var "b" ]));
+
+    `UnsafeFunction
+      ("append", ["a", `Array ty; "x", ty], `Array ty,
+       Apply(Var "aux", [Var "a";
+			 Alloc(If(Length(Var "a") =: Int 0,
+				  Int 2,
+				  Int 2 *: Length(Var "a")), ty);
+			 Int 0;
+			 Var "x"])) ]
+
+let boot : t list = 
+  let printf(x, y) =
+    if !debug then Printf(x, y) else Unit in
+  let hash addr = (addr /: Int 32) %: Int q in
+  append (`Struct[`Int; `Bool]) @
+    [ `UnsafeFunction
+	("gc_clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
+	 If(Var "i" =: Var "n", Unit,
+	    compound
+	      [ Let("x", Get(Var "a", Var "i"),
+		    Set(Var "a", Var "i",
+			Struct[GetValue(Var "x", 0); Bool false]));
+		Apply(Var "gc_clear1", [ Var "a";
+					 Var "i" +: Int 1;
+					 Var "n" ]) ]));
+
+      `UnsafeFunction
+	("gc_clear", [ "a", `Array(`Struct[`Int; ty_bkt]);
+		       "i", `Int ], `Unit,
+	 If(Var "i" =: Length(Var "a"), Unit,
+	    compound
+	      [ Let("nb", Get(Var "a", Var "i"),
+		    Apply(Var "gc_clear1", [ GetValue(Var "nb", 1);
+					     Int 0;
+					     GetValue(Var "nb", 0) ]));
+		Apply(Var "gc_clear", [Var "a"; Var "i" +: Int 1]) ]));
+      
+      `UnsafeFunction("abs", ["n", `Int], `Int,
+		      If(Var "n" >=: Int 0, Var "n", Int 0 -: Var "n"));
+
+      (* Add the reference to the hash table of allocated values. *)
+      `UnsafeFunction
+	("gc_add", [ "p", `Reference ], `Unit,
+	 Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+	     Let("p", AddressOf(Var "p"),
+		 Let("h", Apply(Var "abs", [ hash(Var "p") ]),
+		     Set(Var "a", Var "h",
+			 Let("nb", Get(Var "a", Var "h"),
+			     Let("n", GetValue(Var "nb", 0),
+				 Let("b", GetValue(Var "nb", 1),
+				     If(Var "n" <: Length(Var "b"),
+					compound
+					  [ Set(Var "b", Var "n",
+						Struct[Var "p"; Bool false]);
+					    Struct[Var "n" +: Int 1;
+						   Var "b"] ],
+					Struct
+					  [ Var "n" +: Int 1;
+					    Apply(Var "append",
+						  [ Var "b";
+						    Struct[Var "p";
+							   Bool false ] ])]
+				       )))))))));
+
+      `UnsafeFunction
+	("gc_mark1", [ "a", ty_bkt;
+		       "p", `Int;
+		       "i", `Int ], `Bool,
+	 Let("n", Length(Var "a"),
+	     If(Var "i" =: Var "n",
+		compound
+		  [ Printf("WARNING: Pointer not found: %d\n", [ Var "p" ]);
+		    Bool false ],
+		Let("p2", Get(Var "a", Var "i"),
+		    If(GetValue(Var "p2", 0) =: Var "p",
+		       If(GetValue(Var "p2", 1), Bool false,
+			  compound
+			    [ Set(Var "a", Var "i",
+				  Struct[ Var "p";
+					  Bool true ]);
+			      Bool true ]),
+		       Apply(Var "gc_mark1", [ Var "a";
+					       Var "p";
+					       Var "i" +: Int 1 ]))))));
+
+      (* Push a reference onto the visit stack. *)
+      `UnsafeFunction
+	("gc_push", ["p", `Reference], `Unit,
+	 If(AddressOf(Var "p") =: Int 0, Unit,
+	    Let("a", Load(visit_stack, `Array `Reference),
+		Let("n", Load(n_visit, `Int),
+		    compound
+		      [ Set(Var "a", Var "n", Var "p");
+			Store(n_visit, Var "n" +: Int 1) ]))));
+      
+      (* Mark this reference in the allocated list and, if it was freshly
+	 marked, traverse its children. *)
+      `UnsafeFunction
+	("gc_mark", [ "p", `Reference ], `Unit,
+	 If(AddressOf(Var "p") =: Int 0, Unit,
+	    compound
+	      [ Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+		    Let("h", Apply(Var "abs", [ hash(AddressOf(Var "p")) ]),
+			If(Apply(Var "gc_mark1",
+				 [ GetValue(Get(Var "a", Var "h"), 1);
+				   AddressOf(Var "p");
+				   Int 0 ]),
+			   Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
+			   Unit)));
+
+		Let("n", Load(n_visit, `Int) -: Int 1,
+		    If(Var "n" <: Int 0, Unit,
+		       Let("a", Load(visit_stack, `Array `Reference),
+			   compound
+			     [ Store(n_visit, Var "n");
+			       Apply(Var "gc_mark",
+				     [Get(Var "a", Var "n")]) ]))) ]));
+      
+      (* Mark all roots on the shadow stack. *)
+      `UnsafeFunction
+	("gc_markall", ["i", `Int], `Unit,
+	 Let("s", Load(stack, `Array `Reference),
+	     Let("d", Load(stack_depth, `Int),
+		 If(Var "i" =: Var "d", Unit,
+		    compound
+		      [ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
+			Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
+
+      `UnsafeFunction
+	("gc_sweep1", [ "a", ty_bkt; "i", `Int; "n", `Int ],
+	 `Struct[`Int; ty_bkt],
+	 If(Var "i" =: Var "n", Struct[Var "n"; Var "a"],
+	    Let("p", Get(Var "a", Var "i"),
+		compound
+		  [ If(GetValue(Var "p", 1),
+		       Apply(Var "gc_sweep1", [ Var "a";
+						Var "i" +: Int 1;
+						Var "n" ]),
+		       compound
+			 [ Store(n_allocated,
+				 Load(n_allocated, `Int) -: Int 1);
+			   Free(GetValue(Var "p", 0));
+			   Set(Var "a", Var "i",
+			       Get(Var "a", Var "n" -: Int 1));
+			   Apply(Var "gc_sweep1", [ Var "a";
+						    Var "i";
+						    Var "n" -: Int 1 ]) ])])));
+
+      `UnsafeFunction
+	("gc_sweep", [ "a", `Array(`Struct[`Int; ty_bkt]);
+		       "i", `Int ], `Unit,
+	 If(Var "i" =: Length(Var "a"), Unit,
+	    compound
+	      [ Set(Var "a", Var "i",
+		    Let("nb", Get(Var "a", Var "i"),
+			Apply(Var "gc_sweep1",
+			      [ GetValue(Var "nb", 1);
+				Int 0;
+				GetValue(Var "nb", 0) ])));
+		Apply(Var "gc_sweep", [ Var "a";
+					Var "i" +: Int 1 ]) ]));
+
+      (* Clear, mark and sweep. *)
+      `UnsafeFunction
+	("gc", [], `Unit,
+	 Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
+	     compound
+	       [ printf("GC clearing...\n", []);
+		 Apply(Var "gc_clear", [Var "a"; Int 0]);
+		 printf("GC marking...\n", []);
+		 Apply(Var "gc_markall", [Int 0]);
+		 printf("GC sweeping...\n", []);
+		 Apply(Var "gc_sweep", [Var "a"; Int 0]);
+		 printf("GC done.\n", []);
+		 Store(quota,
+		       Int 8192 +: Int 2 *: Load(n_allocated, `Int))])) ]
+
+(*
+type rule = Rule of (rule -> Expr.t -> Expr.t)
+
+let rec rewrite (Rule rule) = function
+  | `Struct es -> rule(fun rule -> `Struct(List.map (rewrite rule) es))
+  | e -> e
+  | GetValue(e, i) -> GetValue(rewrite rule e, i)
+  | Arith(op, f, g) -> Arith(op, rewrite 
+  | Cmp of [`Lt|`Le|`Eq|`Ge|`Gt|`Ne] * t * t
+  | If of t * t * t
+  | Let of string * t * t
+  | Alloc of t * Type.t
+  | Length of t
+  | Get of t * t
+  | Set of t * t * t
+  | Apply of t * t list
+  | Printf of string * t list
+  | IntOfFloat of t
+  | FloatOfInt of t
+  | Construct of string * t
+  | IsType of t * string
+  | Print of t
+  | Exit of t
+  | AddressOf of t
+  | Cast of t * string
+  | Free of t
+  | Return of t * Type.t
+
+  | Unit
+  | Bool of bool
+  | Int of int
+  | Float of float
+  | Var of string
+  | Load of Llvm.llvalue * Type.t
+  | Store of Llvm.llvalue * t
+  | Visit of t
+  | Llvalue of Llvm.llvalue * Type.t
+  | Magic of t * Type.t
+
+let unroll = function
+  | `Function(f, params, ty_ret, body) ->
+      let rule k =
+	k (function
+	     | Let(x, body, rest) when x=f -> ) in
+      `Function(f, params, ty_ret, unroll_aux f params body)
+  | stmt -> stmt
+*)
+
 (** Compile the GC and compile and run a list of definitions. *)
 let compile_and_run defs =
   let vars = init() in
-  let printf(x, y) =
-    if !debug then Printf(x, y) else Unit in
-  let boot : t list =
-    let append ty =
-      [ `UnsafeFunction("aux", ["a", `Array ty;
-				"b", `Array ty;
-				"i", `Int;
-				"x", ty], `Array ty,
-			If(Var "i" <: Length(Var "a"),
-			   compound
-			     [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
-			       Apply(Var "aux", [Var "a";
-						 Var "b";
-						 Var "i" +: Int 1;
-						 Var "x"]) ],
-			   compound
-			     [ Set(Var "b", Var "i", Var "x");
-			       If(Var "i" >: Int 1, Free(Var "a"), Unit);
-			       Var "b" ]));
-
-	`UnsafeFunction("append", ["a", `Array ty; "x", ty], `Array ty,
-			Apply(Var "aux", [Var "a";
-					  Alloc(Length(Var "a") +: Int 1, ty);
-					  Int 0;
-					  Var "x"])) ] in
-    append (`Struct[`Reference; `Bool]) @
-      [ `UnsafeFunction
-	  ("clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
-	   If(Var "i" =: Var "n", Unit,
-	      compound
-		[ Let("x", Get(Var "a", Var "i"),
-		      Set(Var "a", Var "i",
-			  Struct[GetValue(Var "x", 0); Bool false]));
-		  Apply(Var "clear1", [ Var "a";
-					Var "i" +: Int 1;
-					Var "n" ]) ]));
-
-	`UnsafeFunction
-	  ("gc_clear", [ "a", `Array(`Struct[`Int; ty_bkt]);
-			 "i", `Int ], `Unit,
-	   If(Var "i" =: Length(Var "a"), Unit,
-	      compound
-		[ Let("nb", Get(Var "a", Var "i"),
-		      Apply(Var "clear1", [ GetValue(Var "nb", 1);
-					    Int 0;
-					    GetValue(Var "nb", 0) ]));
-		  Apply(Var "gc_clear", [Var "a"; Var "i" +: Int 1]) ]));
-	
-	`UnsafeFunction("abs", ["n", `Int], `Int,
-			If(Var "n" >=: Int 0, Var "n", Int 0 -: Var "n"));
-
-	(* Add the reference to the hash table of allocated values. *)
-	`UnsafeFunction
-	  ("gc_add", [ "p", `Reference ], `Unit,
-	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-
-	       Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
-		   Set(Var "a", Var "h",
-		       Let("nb", Get(Var "a", Var "h"),
-			   Let("n", GetValue(Var "nb", 0),
-			       Let("b", GetValue(Var "nb", 1),
-				   If(Var "n" <: Length(Var "b"),
-				      compound
-					[ Set(Var "b", Var "n",
-					      Struct[Var "p"; Bool false]);
-					  Struct[Var "n" +: Int 1;
-						 Var "b"] ],
-				      Struct
-					[ Var "n" +: Int 1;
-					  Apply(Var "append",
-						[ Var "b";
-						  Struct[Var "p";
-							 Bool false ] ])]
-				     ))))))));
-
-	`UnsafeFunction
-	  ("mark1", [ "a", ty_bkt;
-		      "p", `Reference;
-		      "i", `Int ], `Bool,
-	   Let("n", Length(Var "a"),
-	       If(Var "i" =: Var "n",
-		  compound
-		    [ Printf("WARNING: Pointer not found: ", []);
-		      Print(AddressOf(Var "p"));
-		      Printf("\n", []);
-		      Bool false ],
-		  Let("p2", Get(Var "a", Var "i"),
-		      If(AddressOf(GetValue(Var "p2", 0)) =:
-			  AddressOf(Var "p"),
-			 If(GetValue(Var "p2", 1), Bool false,
-			    compound
-			      [ Set(Var "a", Var "i",
-				    Struct[GetValue(Var "p2", 0);
-					   Bool true]);
-				Bool true ]),
-			 Apply(Var "mark1", [ Var "a";
-					      Var "p";
-					      Var "i" +: Int 1 ]))))));
-
-	`UnsafeFunction
-	  ("mark0", [ "p", `Reference ], `Bool,
-	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-	       Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
-		   Apply(Var "mark1", [ GetValue(Get(Var "a", Var "h"), 1);
-					Var "p";
-					Int 0 ]))));
-
-	(* Push a reference onto the visit stack. *)
-	`UnsafeFunction
-	  ("gc_push", ["p", `Reference], `Unit,
-	   If(AddressOf(Var "p") =: Int 0, Unit,
-	      Let("a", Load(visit_stack, `Array `Reference),
-		  Let("n", Load(n_visit, `Int),
-		      compound
-			[ Set(Var "a", Var "n", Var "p");
-			  Store(n_visit, Var "n" +: Int 1) ]))));
-	
-	(* Mark this reference in the allocated list and, if it was freshly
-	   marked, traverse its children. *)
-	`UnsafeFunction
-	  ("gc_mark", [ "p", `Reference ], `Unit,
-	   If(AddressOf(Var "p") =: Int 0, Unit,
-	      compound
-		[ If(Apply(Var "mark0", [Var "p"]),
-		     Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
-		     Unit);
-		  Let("n", Load(n_visit, `Int) -: Int 1,
-		      If(Var "n" <: Int 0, Unit,
-			 Let("a", Load(visit_stack, `Array `Reference),
-			     compound
-			       [ Store(n_visit, Var "n");
-				 Apply(Var "gc_mark",
-				       [Get(Var "a", Var "n")]) ]))) ]));
-	
-	(* Mark all roots on the shadow stack. *)
-	`UnsafeFunction
-	  ("gc_markall", ["i", `Int], `Unit,
-	   Let("s", Load(stack, `Array `Reference),
-	       Let("d", Load(stack_depth, `Int),
-		   If(Var "i" =: Var "d", Unit,
-		      compound
-			[ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
-			  Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
-
-	`UnsafeFunction
-	  ("sweep1", [ "a", ty_bkt; "i", `Int; "n", `Int ],
-	   `Struct[`Int; ty_bkt],
-	   If(Var "i" =: Var "n", Struct[Var "n"; Var "a"],
-	      Let("p", Get(Var "a", Var "i"),
-		  compound
-		    [ If(GetValue(Var "p", 1),
-			 Apply(Var "sweep1", [ Var "a";
-					       Var "i" +: Int 1;
-					       Var "n" ]),
-			 compound
-			   [ Store(n_allocated,
-				   Load(n_allocated, `Int) -: Int 1);
-			     Free(GetValue(Var "p", 0));
-			     Set(Var "a", Var "i",
-				 Get(Var "a", Var "n" -: Int 1));
-			     Apply(Var "sweep1", [ Var "a";
-						   Var "i";
-						   Var "n" -: Int 1 ]) ])])));
-
-	`UnsafeFunction
-	  ("gc_sweep", [ "a", `Array(`Struct[`Int; ty_bkt]);
-			 "i", `Int ], `Unit,
-	   If(Var "i" =: Length(Var "a"), Unit,
-	      compound
-		[ Set(Var "a", Var "i",
-		      Let("nb", Get(Var "a", Var "i"),
-			  Apply(Var "sweep1",
-				[ GetValue(Var "nb", 1);
-				  Int 0;
-				  GetValue(Var "nb", 0) ])));
-		  Apply(Var "gc_sweep", [ Var "a";
-					  Var "i" +: Int 1 ]) ]));
-
-	(* Clear, mark and sweep. *)
-	`UnsafeFunction
-	  ("gc", [], `Unit,
-	   Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-	       compound
-		 [ printf("GC clearing...\n", []);
-		   Apply(Var "gc_clear", [Var "a"; Int 0]);
-		   printf("GC marking...\n", []);
-		   Apply(Var "gc_markall", [Int 0]);
-		   printf("GC sweeping...\n", []);
-		   Apply(Var "gc_sweep", [Var "a"; Int 0]);
-		   printf("GC done.\n", []);
-		   Store(quota, Int 4 *: Load(n_allocated, `Int))])) ] in
   let vars = List.fold_left def vars boot in
   let _ = List.fold_left def vars defs in
   let f_name = "main" in

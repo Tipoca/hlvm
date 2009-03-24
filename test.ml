@@ -659,7 +659,7 @@ let () =
 	 tuples @
 	 trig @
 	 fold 100000000 @
-	 list 1000000 @
+	 list 3000000 @
 	 curry @
 	 queens 8 @
 	 queens 9 @
