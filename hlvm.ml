@@ -7,7 +7,7 @@ open Llvm_analysis
 
 open Expr
 
-(** Auxiliary list-related functions. *)
+(** Definitions related to the list type. *)
 module List = struct
   include List
 
@@ -36,7 +36,7 @@ let debug = ref false
 external build_extractvalue :
   llvalue -> int -> string -> llbuilder -> llvalue =
       "llvm_build_extractvalue"
-      
+
 (** Binding to the LLVM insertvalue instruction. *)
 external build_insertvalue :
   llvalue -> llvalue -> int -> string -> llbuilder -> llvalue =
@@ -407,7 +407,7 @@ exception Returned
 type t =
     [ `UnsafeFunction of string * (string * Type.t) list * Type.t * Expr.t
     | `Function of string * (string * Type.t) list * Type.t * Expr.t
-    | `Expr of Expr.t * Type.t
+    | `Expr of Expr.t
     | `Extern of string * Type.t list * Type.t
     | `Type of string * Type.t ]
 
@@ -470,7 +470,7 @@ and expr_aux vars state = function
   | Construct(f, x) ->
       let llty, ty = find_type f in
       let state, (x, ty_x) = expr vars state x in
-      assert(Type.eq ty ty_x);
+      type_check "Type constructor argument of wrong type" ty ty_x;
       let state, s =
 	match ty_x with
 	| `Unit -> state, Ref.mk state llty (int 0) null
@@ -484,7 +484,7 @@ and expr_aux vars state = function
       state, (s, `Reference)
   | IsType(f, ty_name) ->
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_f `Reference);
+      type_check "IsType of non-reference type" ty_f `Reference;
       let llty_f = extractvalue state f Ref.llty in
       let llty_f = state#bitcast llty_f (pointer_type RTType.lltype) in
       let llty, ty = find_type ty_name in
@@ -492,7 +492,7 @@ and expr_aux vars state = function
   | Cast(f, ty_name) ->
       (* FIXME: This is unsafe. *)
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_f `Reference);
+      type_check "Cast of non-reference type" ty_f `Reference;
       let llty, ty = find_type ty_name in
       let v = extractvalue state f Ref.data in
       let v = state#bitcast v (pointer_type(lltype_of ty)) in
@@ -535,7 +535,7 @@ and expr_aux vars state = function
   | Return(If(p, t, f), ty_ret) ->
       (* Tail expressions in both branches. *)
       let state, (p, ty_p) = expr vars state p in
-      assert(Type.eq ty_p `Bool);
+      type_check "Predicate of non-bool type" ty_p `Bool;
       let t_state, f_state = state#mk "pass", state#mk "fail" in
       let _ = build_cond_br p t_state#blk f_state#blk state#bb in
       return vars t_state t ty_ret;
@@ -543,7 +543,7 @@ and expr_aux vars state = function
       raise Returned
   | If(p, t, f) ->
       let state, (p, ty_p) = expr vars state p in
-      assert(Type.eq ty_p `Bool);
+      type_check "Predicate of non-bool type" ty_p `Bool;
       let t_state, f_state = state#mk "pass", state#mk "fail" in
       let _ = build_cond_br p t_state#blk f_state#blk state#bb in
       let k_state = state#mk "cont" in
@@ -562,7 +562,7 @@ and expr_aux vars state = function
       state, (g, ty_g)
   | Alloc(n, ty) ->
       let state, (n, ty_n) = expr vars state n in
-      assert(Type.eq ty_n `Int);
+      type_check "Alloc with non-int length" ty_n `Int;
       let data = state#malloc (lltype_of ty) n in
       let a, ty_a = Ref.mk state (mk_array_type ty) n data, `Array ty in
       let state = gc_root vars state a ty_a in
@@ -570,7 +570,8 @@ and expr_aux vars state = function
       state, (a, ty_a)
   | Length a ->
       let state, (a, ty_a) = expr vars state a in
-      assert(match ty_a with `Array _ -> true | _ -> false);
+      (match ty_a with `Array _ -> ()
+       | _ -> invalid_arg "Length of non-array");
       state, (extractvalue state a Ref.tag, `Int)
   | Get(a, i) ->
       let state, (a, ty_a), (i, ty_i) = expr2 vars state a i in
@@ -592,8 +593,8 @@ and expr_aux vars state = function
   | Set(a, i, x) ->
       let state, (a, ty_a), (i, ty_i), (x, ty_x) =
 	expr3 vars state a i x in
-      assert(Type.eq ty_a (`Array ty_x));
-      assert(Type.eq ty_i `Int);
+      type_check "Set with invalid element type" ty_a (`Array ty_x);
+      type_check "Set with non-int index" ty_i `Int;
       let state, _ =
 	expr vars state
 	  (If((Llvalue(i, `Int) >=: Int 0) &&:
@@ -620,7 +621,7 @@ and expr_aux vars state = function
 	    List.iter2 (type_check "Arg") tys_arg tys_arg';
 	    type_check "Return" ty_ret ty_ret';
 	    state#call cc f args
-        | _ -> assert false in
+        | _ -> invalid_arg "Apply of non-function" in
       set_tail_call true call;
       state#ret call;
       raise Returned
@@ -639,7 +640,7 @@ and expr_aux vars state = function
 	    (* Non-tail call returning single value. *)
 	    List.iter2 (type_check "Arg") tys_arg tys_arg';
 	    state#call cc f args, ty_ret
-	| _ -> assert false in
+	| _ -> invalid_arg "Apply of non-function" in
       let state = gc_root vars state ret ty_ret in
       state, (ret, ty_ret)
   | Printf(spec, args) ->
@@ -653,11 +654,11 @@ and expr_aux vars state = function
       state, (int 0, `Unit)
   | IntOfFloat f ->
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_f `Float);
+      type_check "IntOfFloat of non-float" ty_f `Float;
       state, (build_fptosi f (lltype_of `Int) "" state#bb, `Int)
   | FloatOfInt f ->
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_f `Int);
+      type_check "FloatOfInt of non-int" ty_f `Int;
       state, (build_sitofp f (lltype_of `Float) "" state#bb, `Float)
   | Print f ->
       let state, (f, ty_f) = expr vars state f in
@@ -700,7 +701,7 @@ and expr_aux vars state = function
 	    let p = extractvalue state llty RTType.visit in
 	    state, (p, `Function([`Function([`Reference], `Unit);
 				  `Reference], `Unit))
-	| ty -> assert false
+	| ty -> invalid_arg "Visit of non-reference"
       end
   | Free f ->
       let state, (f, ty_f) = expr vars state f in
@@ -708,7 +709,7 @@ and expr_aux vars state = function
 	| `Array _ | `Reference ->
 	    extractvalue state f Ref.data
 	| `Int -> state#ptr_of_int f string_type
-	| _ -> assert false in
+	| _ -> invalid_arg "Free of non-(array|reference|int)" in
       state#free data;
       state, (int 0, `Unit)
   | Exit f ->
@@ -724,27 +725,22 @@ and expr_aux vars state = function
       let state, (f, ty_f) = expr vars state f in
       let ptr = extractvalue state f Ref.data in
       let ptr = state#int_of_ptr ptr in
-      (*
-	let ptr = build_ptrtoint ptr int_type "" state#bb in
-      *)
       state, (ptr, `Int)
   | Llvalue(v, ty) -> state, (v, ty)
   | Magic(f, ty) ->
       let state, (f, ty_f) = expr vars state f in
-      assert(is_ref_type ty_f);
+      if not(is_ref_type ty_f) then
+	invalid_arg "Magic of non-reference";
       state, (f, ty)
-  | Return(f, ty_ret) when is_struct ty_ret ->
-      let state, (f, ty_f) = expr vars state f in
-      type_check "Return" ty_ret ty_f;
-      state#store state#sret [int 0] f;
-      state#gc_restore();
-      state#ret (int 0);
-      raise Returned
   | Return(f, ty_ret) ->
       let state, (f, ty_f) = expr vars state f in
-      assert(Type.eq ty_ret ty_f);
+      type_check "Return" ty_ret ty_f;
       state#gc_restore();
-      state#ret f;
+      if is_struct ty_f then begin
+	state#store state#sret [int 0] f;
+	state#ret (int 0);
+      end else
+	state#ret f;
       raise Returned
 
 (** Compile two expressions. *)
@@ -864,7 +860,7 @@ and def vars = function
 	       (If(Load(n_allocated, `Int) <=: Load(quota, `Int), Unit,
 		   Apply(Var "gc", []))) in
 	   return vars state body ty_ret)
-  | `Expr(f, ty_f) ->
+  | `Expr f ->
       if !debug then
 	eprintf "def <expr>\n%!";
 
@@ -900,10 +896,11 @@ and def vars = function
 	       state#call CallConv.c stackoverflow_install_handler
 		 [llvm_handler; stack; int size] in
 	     let t1 = Llvalue(state#time, `Float) in
+	     let state, (f, ty_f) = expr vars state f in
 	     let f =
 	       compound
-		 [ Printf("- : <type> = ", []);
-		   Print f;
+		 [ Printf("- : "^Type.to_string () ty_f^" = ", []);
+		   Print(Llvalue(f, ty_f));
 		   Printf("\n", []) ] in
 	     let state, _ = expr vars state f in
 	     state#gc_restore();
@@ -1344,19 +1341,22 @@ let boot : t list =
 		 Store(quota,
 		       Int 8192 +: Int 2 *: Load(n_allocated, `Int))])) ]
 
-(** Compile the GC and compile and run a list of definitions. *)
-let compile_and_run defs =
-  let vars = init() in
-  let vars = List.fold_left def vars boot in
-  let _ = List.fold_left def vars defs in
+(** Bound variables. *)
+let vars = ref(List.fold_left def (init()) boot)
+
+(** Evaluate a statement, updating the bound variables. *)
+let eval stmt =
+  vars := def !vars stmt
+
+(** Save everything that has been evaluated as a standalone program. *)
+let save() =
   let f_name = "main" in
   let _ =
-    defun vars CallConv.c f_name ["", `Unit] `Unit
+    defun !vars CallConv.c f_name ["", `Unit] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
 	 let call llf =
 	   ignore(state#call CallConv.c llf [int 0]) in
 	 List.iter call !eval_functions;
 	 return vars state Unit `Unit) in
-  Printf.printf "Writing bitcode\n%!";
   ignore(Llvm_bitwriter.write_bitcode_file m "aout.bc")

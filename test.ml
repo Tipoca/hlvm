@@ -9,7 +9,7 @@ let fib : Hlvm.t list =
 	 Apply(Var "fib", [n -: Int 2]) +: Apply(Var "fib", [n -: Int 1]),
 	 n));
 
-   `Expr(Apply(Var "fib", [Int 40]), `Int)]
+   `Expr(Apply(Var "fib", [Int 40]))]
 
 (** Float-based Fibonacci benchmark *)
 let ffib : Hlvm.t list =
@@ -21,7 +21,7 @@ let ffib : Hlvm.t list =
 	   Apply(Var "fib", [n -: Float 1.0]),
 	 n));
 
-   `Expr(Apply(Var "fib", [Float 40.]), `Float)]
+   `Expr(Apply(Var "fib", [Float 40.]))]
 
 let fill ty =
   [`Function
@@ -63,8 +63,7 @@ let sieve i : Hlvm.t list =
 	       compound
 		 [ Apply(Var "fill", [Var "a"; Bool true; Int 0]);
 		   Apply(Var "loop1", [Var "a"; Int 2]);
-		   Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ]),
-	   `Int)]
+		   Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ]))]
 
 let mandelbrot n : Hlvm.t list =
   [`Function
@@ -102,7 +101,7 @@ let mandelbrot n : Hlvm.t list =
 	     Printf("\n", []);
 	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
 
-   `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
+   `Expr(Apply(Var "col", [Int 0; Int n]))]
 
 let mandelbrot2 n : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
@@ -149,7 +148,7 @@ let mandelbrot2 n : Hlvm.t list =
 	     Printf("\n", []);
 	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
 
-   `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
+   `Expr(Apply(Var "col", [Int 0; Int n]))]
 
 let mandelbrot3 n : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
@@ -201,7 +200,7 @@ let mandelbrot3 n : Hlvm.t list =
 	     Printf("\n", []);
 	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
 
-   `Expr(Apply(Var "col", [Int 0; Int n]), `Unit)]
+   `Expr(Apply(Var "col", [Int 0; Int n]))]
 
 let tco n : Hlvm.t list =
   [`Function("even", ["odd", `Function([`Int], `Int); "n", `Int], `Int,
@@ -212,7 +211,7 @@ let tco n : Hlvm.t list =
 		Apply(Var "even", [Var "odd"; Var "n" +: Int 1]),
 		Var "n"));
 
-   `Expr(Apply(Var "even", [Var "odd"; Int 0]), `Int)]
+   `Expr(Apply(Var "even", [Var "odd"; Int 0]))]
 
 let tuples : Hlvm.t list =
   [`Function("id", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
@@ -225,7 +224,7 @@ let tuples : Hlvm.t list =
 	     Apply(Var "id", [Struct[GetValue(Var "s", 1);
 				     GetValue(Var "s", 0)]]));
 
-   `Expr(Apply(Var "rev", [Struct[Int 2; Float 3.4]]), `Struct[`Float; `Int])]
+   `Expr(Apply(Var "rev", [Struct[Int 2; Float 3.4]]))]
 
 let trig : Hlvm.t list =
   let triple = `Struct[`Float; `Float; `Float] in
@@ -236,7 +235,7 @@ let trig : Hlvm.t list =
 		    Apply(Var "f", [Float 0.2]);
 		    Apply(Var "f", [Float 0.3])]);
    `Expr(compound[Print(Apply(Var "test", [Var "sin"]));
-		  Print(Apply(Var "test", [Var "cos"]))], `Unit)]
+		  Print(Apply(Var "test", [Var "cos"]))])]
 
 (*
   OCaml: 4.53s recursive
@@ -274,8 +273,7 @@ let fold n : Hlvm.t list =
 	       compound
 		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
 		   Apply(Var "fold",
-			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]),
-	   `Struct[`Float; `Float])]
+			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]))]
 
 let fold n : Hlvm.t list =
   fill `Float @
@@ -297,8 +295,7 @@ let fold n : Hlvm.t list =
 	       compound
 		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
 		   Apply(Var "fold_aux",
-			 [Int 0; Struct[Float 0.; Float 0.]; Var "xs"])]),
-	   `Struct[`Float; `Float])]
+			 [Int 0; Struct[Float 0.; Float 0.]; Var "xs"])]))]
 
 (** Type of a list. *)
 let ty_list ty =
@@ -338,9 +335,9 @@ let list n : Hlvm.t list =
       list_fold_left `Int `Int;
       
       `Expr(Let("list", Apply(Var "init", [nil; Int n]),
-		Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])), `Int);
+		Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])));
       
-      `Expr(Apply(Var "init", [nil; Int 10]), `Reference);
+      `Expr(Apply(Var "init", [nil; Int 10]));
 
       `Function("print", ["x", `Reference], `Unit,
 		compound
@@ -352,7 +349,7 @@ let list n : Hlvm.t list =
 		    Apply(Visit(Var "x"), [Var "print"; Var "x"]) ]);
 
       `Expr(Let("list", Apply(Var "init", [nil; Int 10]),
-		Apply(Visit(Var "list"), [Var "print"; Var "list"])), `Unit)]
+		Apply(Visit(Var "list"), [Var "print"; Var "list"])))]
 
 (** Type of a closure. *)
 let ty_closure(ty1, ty2) =
@@ -377,7 +374,7 @@ let curry : Hlvm.t list =
 
    `Expr(Let("g", Apply(Var "f_apply_1", [Int 3]),
 	     Struct[apply(Var "g", Float 2.3);
-		    apply(Var "g", Float 3.4)]), `Struct[ty_ret; ty_ret])]
+		    apply(Var "g", Float 3.4)]))]
 
 let list_filter ty : Hlvm.t =
   `Function("filter", ["pred", ty_closure(ty, `Bool);
@@ -453,8 +450,7 @@ let queens n =
 
       `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1);
 
-      `Expr(Apply(Var "search", [Var "f"; Int n; nil; ps; Int 0]),
-	    `Int)]
+      `Expr(Apply(Var "search", [Var "f"; Int n; nil; ps; Int 0]))]
 
 let gc =
   let append ty =
@@ -624,8 +620,7 @@ let gc =
 					     Var "b";
 					     Int 0 ]);
 			Apply(Var "sweep", [ Var "a"; Int 0 ]);
-		      ])),
-	    `Array `Int) ]
+		      ]))) ]
 
 (** Insert debug information at the beginning of each function. *)
 let rec trace : Hlvm.t list -> Hlvm.t list = function
@@ -647,23 +642,23 @@ let () =
     | [|_; "--debug"|] -> Hlvm.debug := true
     | _ -> ()
   end;
-  Hlvm.compile_and_run
-    ((
-       fib @
-	 ffib @
-	 sieve 100000000 @
-	 mandelbrot 77 @
-	 mandelbrot2 77 @
-	 mandelbrot3 77 @
-	 tco 1000000 @
-	 tuples @
-	 trig @
-	 fold 100000000 @
-	 list 3000000 @
-	 curry @
-	 queens 8 @
-	 queens 9 @
-	 queens 10 @
-	 gc @
-	 []
-     ))
+  let defs =
+    fib @
+      ffib @
+      sieve 100000000 @
+      mandelbrot 77 @
+      mandelbrot2 77 @
+      mandelbrot3 77 @
+      tco 1000000 @
+      tuples @
+      trig @
+      fold 100000000 @
+      list 3000000 @
+      curry @
+      queens 8 @
+      queens 9 @
+      queens 10 @
+      gc @
+      [] in
+  List.iter Hlvm.eval defs;
+  Hlvm.save()
