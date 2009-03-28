@@ -637,11 +637,6 @@ let rec trace : Hlvm.t list -> Hlvm.t list = function
 
 (** Main program. *)
 let () =
-  begin
-    match Sys.argv with
-    | [|_; "--debug"|] -> Hlvm.debug := true
-    | _ -> ()
-  end;
   let defs =
     fib @
       ffib @

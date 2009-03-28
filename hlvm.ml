@@ -28,6 +28,9 @@ module List = struct
     | x::xs -> x::sep::between sep xs
 end
 
+(** Global boolean to enable viewing of generated functions. *)
+let view = ref false
+
 (** Global boolean to enable debug output in both the compiler and the
     generated code. Enabled by the command-line argument "--debug". *)
 let debug = ref false
@@ -101,7 +104,8 @@ end
 
 (** Convert a type from our type system into LLVM's type system. *)
 let rec lltype_of : Type.t -> lltype = function
-  | `Unit | `Int -> int_type
+  | `Unit -> string_type
+  | `Int -> int_type
   | `Bool -> i1_type
   | `Float -> double_type
   | `Struct tys -> struct_type_of tys
@@ -137,6 +141,9 @@ end
 
 let print_type_of v =
   printf "%s\n%!" (string_of_lltype(type_of v))
+
+(** LLVM value used to represent the value () of the type unit. *)
+let unit = undef string_type
 
 (** Create an LLVM native int. *)
 let int n = const_int int_type n
@@ -434,6 +441,8 @@ let eval_functions = ref []
 (** Register a function and execute it. *)
 let run_function llf =
   eval_functions := !eval_functions @ [llf];
+  (* We pass a single dummy argument because the current OCaml bindings in
+     LLVM are broken if no arguments are passed (they call malloc(0)). *)
   ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee
 
 (** Compile an expression in the context of current vars into the given
@@ -451,7 +460,7 @@ let rec expr vars (state: state) e =
     printf "<- %s\n%!" (string_of_lltype(type_of x));
   ret
 and expr_aux vars state = function
-  | Unit -> state, (int 0, `Unit)
+  | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Int n -> state, (int n, `Int)
   | Float x -> state, (float64 x, `Float)
@@ -494,11 +503,12 @@ and expr_aux vars state = function
       let state, (f, ty_f) = expr vars state f in
       type_check "Cast of non-reference type" ty_f `Reference;
       let llty, ty = find_type ty_name in
-      let v = extractvalue state f Ref.data in
-      let v = state#bitcast v (pointer_type(lltype_of ty)) in
-      let v = state#load v [int 0] in
-      let state = gc_root vars state v ty in
-      state, (v, ty)
+      if ty = `Unit then state, (unit, `Unit) else
+	let v = extractvalue state f Ref.data in
+	let v = state#bitcast v (pointer_type(lltype_of ty)) in
+	let v = state#load v [int 0] in
+	let state = gc_root vars state v ty in
+	state, (v, ty)
   | Var x ->
       let x, ty_x = find x vars.vals in
       state, (x, ty_x)
@@ -552,7 +562,9 @@ and expr_aux vars state = function
       let f_state, (f, ty_f) = expr vars f_state f in
       f_state#br k_state;
       type_check "If" ty_t ty_f;
-      k_state, (build_phi [t, t_state#blk; f, f_state#blk] "" k_state#bb, ty_t)
+      if ty_t = `Unit then k_state, (unit, `Unit) else
+	let v = build_phi [t, t_state#blk; f, f_state#blk] "" k_state#bb in
+	k_state, (v, ty_t)
   | Return(Let(x, f, g), ty_ret) ->
       (* Tail expression in "rest". *)
       expr vars state (Let(x, f, Return(g, ty_ret)))
@@ -604,24 +616,20 @@ and expr_aux vars state = function
       let data = extractvalue state a Ref.data in
       let data = state#bitcast data (pointer_type(lltype_of ty_x)) in
       state#store data [i] x;
-      state, (int 0, `Unit)
+      state, (unit, `Unit)
   | Return(Apply(f, args), ty_ret) ->
       let state, (f, ty_f) = expr vars state f in
       let state, (args, tys_arg) = exprs vars state args in
       state#gc_restore();
-      let call = match ty_f with
-	| `Function(tys_arg', ty_ret') when is_struct ty_ret' ->
-	    (* Tail call returning struct. Pass the sret given to us by our
-	       caller on to our tail callee. *)
-	    List.iter2 (type_check "Arg") tys_arg tys_arg';
-	    type_check "Return" ty_ret ty_ret';
-            state#call cc f (state#sret :: args)
-        | `Function(tys_arg', ty_ret') ->
-	    (* Tail call returning single value. *)
-	    List.iter2 (type_check "Arg") tys_arg tys_arg';
-	    type_check "Return" ty_ret ty_ret';
-	    state#call cc f args
-        | _ -> invalid_arg "Apply of non-function" in
+      type_check "Function" ty_f (`Function(tys_arg, ty_ret));
+      let call, ty_ret =
+	if is_struct ty_ret then
+	  (* Tail call returning struct. Pass the sret given to us by our
+	     caller on to our tail callee. *)
+          state#call cc f (state#sret :: args), `Unit
+	else
+	  (* Tail call returning single value. *)
+	  state#call cc f args, ty_ret in
       set_tail_call true call;
       state#ret call;
       raise Returned
@@ -651,7 +659,7 @@ and expr_aux vars state = function
 	  build_fpext x double_type "" state#bb in
       let args = List.map ext args in
       ignore(state#call CallConv.c llprintf (spec::args));
-      state, (int 0, `Unit)
+      state, (unit, `Unit)
   | IntOfFloat f ->
       let state, (f, ty_f) = expr vars state f in
       type_check "IntOfFloat of non-float" ty_f `Float;
@@ -711,16 +719,16 @@ and expr_aux vars state = function
 	| `Int -> state#ptr_of_int f string_type
 	| _ -> invalid_arg "Free of non-(array|reference|int)" in
       state#free data;
-      state, (int 0, `Unit)
+      state, (unit, `Unit)
   | Exit f ->
       let state, (f, ty_f) = expr vars state f in
       ignore(state#call CallConv.c llexit [f]);
-      state, (int 0, `Unit)
+      state, (unit, `Unit)
   | Load(addr, ty) -> state, (state#load addr [int 0], ty)
   | Store(addr, f) ->
       let state, (f, ty_f) = expr vars state f in
       state#store addr [int 0] f;
-      state, (int 0, `Unit)
+      state, (unit, `Unit)
   | AddressOf f ->
       let state, (f, ty_f) = expr vars state f in
       let ptr = extractvalue state f Ref.data in
@@ -738,7 +746,7 @@ and expr_aux vars state = function
       state#gc_restore();
       if is_struct ty_f then begin
 	state#store state#sret [int 0] f;
-	state#ret (int 0);
+	state#ret unit;
       end else
 	state#ret f;
       raise Returned
@@ -825,10 +833,10 @@ and defun vars cc f args ty_ret k =
 
   let _ = entry#br start in
 
-  Llvm_analysis.assert_valid_function llvm_f;
-  (*
+  if !view then
     Llvm_analysis.view_function_cfg llvm_f;
-  *)
+  Llvm_analysis.assert_valid_function llvm_f;
+
   vars
 
 (** Compile a top-level definition. *)
@@ -887,7 +895,7 @@ and def vars = function
 
       let f_name = "eval_expr" in
       let vars' =
-	defun vars CallConv.c f_name ["", `Unit] `Unit
+	defun vars CallConv.c f_name ["", `Int] `Unit
 	  (fun vars state ->
 	     let size = 16384 in
 	     let stack = state#alloca (array_type i8_type size) in
@@ -939,6 +947,8 @@ and def vars = function
       Llvm_analysis.assert_valid_function llvm_f;
       add_val (f, (llvm_f, `Function ty)) vars
   | `Type(c, ty) ->
+      if !debug then
+	eprintf "def type %s\n%!" c;
       (* Define a new type constructor. *)
       let name = c ^ Type.to_string () ty in
       if !debug then
@@ -1045,7 +1055,7 @@ and init_type name llty llvisit llprint =
 
   let f = "init_type_"^name in
   let vars =
-    defun vars CallConv.c f ["", `Unit] `Unit
+    defun vars CallConv.c f ["", `Int] `Unit
       (fun vars state ->
 	 let s =
 	   Struct
@@ -1099,10 +1109,12 @@ let fill ty =
 
 (** Dynamically load the runtime and initialize the shadow stack and GC. *)
 let init() =
+  if !debug then
+    eprintf "init()\n%!";
   let f_name = "init_runtime" in
   let vars' = def vars (fill(`Struct[`Int; ty_bkt])) in
   let vars' =
-    defun vars' CallConv.c f_name ["", `Unit] `Unit
+    defun vars' CallConv.c f_name ["", `Int] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
 	 let str s =
@@ -1149,17 +1161,17 @@ let init() =
   vars
 
 let append ty =
-  [ `UnsafeFunction("aux", ["a", `Array ty;
-			    "b", `Array ty;
-			    "i", `Int;
-			    "x", ty], `Array ty,
+  [ `UnsafeFunction("append_aux", ["a", `Array ty;
+				   "b", `Array ty;
+				   "i", `Int;
+				   "x", ty], `Array ty,
 		    If(Var "i" <: Length(Var "a"),
 		       compound
 			 [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
-			   Apply(Var "aux", [Var "a";
-					     Var "b";
-					     Var "i" +: Int 1;
-					     Var "x"]) ],
+			   Apply(Var "append_aux", [Var "a";
+						    Var "b";
+						    Var "i" +: Int 1;
+						    Var "x"]) ],
 		       compound
 			 [ Set(Var "b", Var "i", Var "x");
 			   If(Var "i" >: Int 1, Free(Var "a"), Unit);
@@ -1167,12 +1179,12 @@ let append ty =
 
     `UnsafeFunction
       ("append", ["a", `Array ty; "x", ty], `Array ty,
-       Apply(Var "aux", [Var "a";
-			 Alloc(If(Length(Var "a") =: Int 0,
-				  Int 2,
-				  Int 2 *: Length(Var "a")), ty);
-			 Int 0;
-			 Var "x"])) ]
+       Apply(Var "append_aux", [Var "a";
+				Alloc(If(Length(Var "a") =: Int 0,
+					 Int 2,
+					 Int 2 *: Length(Var "a")), ty);
+				Int 0;
+				Var "x"])) ]
 
 let boot : t list = 
   let printf(x, y) =
@@ -1342,7 +1354,7 @@ let boot : t list =
 		       Int 8192 +: Int 2 *: Load(n_allocated, `Int))])) ]
 
 (** Bound variables. *)
-let vars = ref(List.fold_left def (init()) boot)
+let vars = ref vars
 
 (** Evaluate a statement, updating the bound variables. *)
 let eval stmt =
@@ -1352,7 +1364,7 @@ let eval stmt =
 let save() =
   let f_name = "main" in
   let _ =
-    defun !vars CallConv.c f_name ["", `Unit] `Unit
+    defun !vars CallConv.c f_name [] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
 	 let call llf =
@@ -1360,3 +1372,10 @@ let save() =
 	 List.iter call !eval_functions;
 	 return vars state Unit `Unit) in
   ignore(Llvm_bitwriter.write_bitcode_file m "aout.bc")
+
+let () =
+  Array.iter (function
+		| "--debug" -> debug := true
+		| "--view-functions" -> view := true
+		| _ -> ()) Sys.argv;
+  vars := List.fold_left def (init()) boot
