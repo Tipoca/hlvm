@@ -1084,13 +1084,13 @@ and mk_fun vars cc f args ty_ret body =
 let q = 997    (* 20.94s 23.19s *)
 let q = 2047   (* 10.77s 22.57s *)
 let q = 4093   (*  6.18s 27.39s *)
-let q = 8191   (*  3.96s 30.78s *)
 let q = 9973   (*  3.62s 31.19s *)
+let q = 16381  (*  2.95s 36.65s *)
 let q = 30011  (*  2.54s 50.18s *)
 let q = 524287 (*  2.16s 74.92s *)
 *)
 (** Number of buckets in the hash table used by the GC. *)
-let q = 16381  (*  2.95s 36.65s *)
+let q = 8191   (*  3.96s 30.78s *)
 
 (** Type of a hash table bucket. *)
 let ty_bkt = `Array(`Struct[`Int; `Bool])
@@ -1189,7 +1189,7 @@ let append ty =
 let boot : t list = 
   let printf(x, y) =
     if !debug then Printf(x, y) else Unit in
-  let hash addr = (addr /: Int 32) %: Int q in
+  let hash addr = (addr /: Int 512) %: Int q in
   append (`Struct[`Int; `Bool]) @
     [ `UnsafeFunction
 	("gc_clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
