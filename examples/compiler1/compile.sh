@@ -1,7 +1,7 @@
 HLVM=../../
 ln -fs ../../libruntime.so
 ocamllex lex.mll
-ocamlyacc parse.mly
+ocamlyacc -v parse.mly
 ocamlc -c expr.ml
 ocamlc -c parse.mli
 ocamlc -c parse.ml
