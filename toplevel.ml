@@ -1,4 +1,5 @@
 open Printf
+open Hlvm
 open Expr
 open Camlp4.PreCast
 

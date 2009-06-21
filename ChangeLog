@@ -1,3 +1,13 @@
+Sun Jun 21 20:04:48 BST 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Added two examples: a trivial calculator and a rudimentary compiler
+	with support for recursive function definitions with explicit types and
+	unit, char, int, float and tuple types. Arrays will require
+	polymorphism.
+	* Note: closures that do not require cycles can be represented entirely
+	unboxed.
+
+
 Sat Mar 21 17:42:31 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Memoized constant string literals.

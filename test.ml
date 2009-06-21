@@ -1,3 +1,4 @@
+open Hlvm
 open Expr
 
 (** Integer Fibonacci benchmark *)
