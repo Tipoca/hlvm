@@ -3,6 +3,10 @@ type ty =
 
 type cmp = [`Lt|`Le|`Eq|`Ne|`Ge|`Gt]
 
+type patt =
+  | PVar of string
+  | PTup of patt list
+
 type t =
   | Unit
   | Int of int
@@ -14,11 +18,7 @@ type t =
   | BinArith of [`Add|`Sub|`Mul|`Div] * t * t
   | Cmp of cmp * t * t
   | If of t * t * t
-  | LetIn of string * t * t
-
-type patt =
-  | PVar of string
-  | PTup of patt list
+  | LetIn of patt * t * t
 
 type toplevel =
   | Expr of t

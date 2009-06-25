@@ -1,6 +1,5 @@
 {
   open Parse
-  open Expr
 
   let ident = function
     | "let" -> LET
@@ -21,7 +20,7 @@ let ident = ['A'-'Z' 'a'-'z'] ['A'-'Z' 'a'-'z' '0'-'9' '_' '\'']*
 
 rule token = parse
   | [' ' '\t']       { token lexbuf }
-  | '\n'             { token lexbuf }
+  | '\n'             { Lexing.new_line lexbuf; token lexbuf }
   | floating as s    { FLOAT s }
   | digit+ as s      { INT s }
   | ident as s       { ident s }

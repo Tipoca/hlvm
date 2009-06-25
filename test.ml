@@ -1,3 +1,5 @@
+(** Test programs for HLVM. *)
+
 open Hlvm
 open Expr
 

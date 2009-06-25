@@ -1,3 +1,10 @@
+(** High-Level Virtual Machine (HLVM).
+
+    The design and implementation of this high-performance garbage collected
+    virtual machine is described in detail in the OCaml Journal articles
+    "Building a Virtual Machine with LLVM" from January to March 2009.
+*)
+
 open Printf
 open Llvm
 open Llvm_executionengine

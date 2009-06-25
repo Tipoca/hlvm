@@ -1,1 +1,1 @@
-rm -f *~ repl parse.mli parse.ml lex.ml *.annot *.cm* libruntime.so llvm_stubs.o
+rm -f *~ repl parse.mli parse.ml parse.output lex.ml *.annot *.cm* libruntime.so llvm_stubs.o

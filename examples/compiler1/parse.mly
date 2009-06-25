@@ -21,7 +21,7 @@
 %token <string> IDENT
 
 %start toplevel
-%type <Expr.toplevel> toplevel
+%type <Expr.toplevel option> toplevel
 
 %left SEMISEMI
 %left LET IN
@@ -97,13 +97,14 @@ expr:
 | expr NE expr { Cmp(`Ne, $1, $3) }
 | expr GE expr { Cmp(`Ge, $1, $3) }
 | expr GT expr { Cmp(`Gt, $1, $3) }
-| expr SEMI expr { LetIn("_", $1, $3) }
-| LET IDENT EQ expr IN expr { LetIn($2, $4, $6) }
+| expr SEMI expr { LetIn(PVar "_", $1, $3) }
+| LET patt EQ expr IN expr { LetIn($2, $4, $6) }
 | IF expr THEN expr ELSE expr { If($2, $4, $6) }
 ;
 
 toplevel:
-| expr SEMISEMI { Expr $1 }
+| EOF { None }
+| expr SEMISEMI { Some(Expr $1) }
 | LET REC IDENT OPEN patt COLON ty CLOSE COLON ty EQ expr SEMISEMI
-      { Defun($3, $5, $7, $10, $12) }
+      { Some(Defun($3, $5, $7, $10, $12)) }
 ;

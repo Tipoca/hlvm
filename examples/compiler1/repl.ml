@@ -1,4 +1,11 @@
+(* This is a Read-Evaluate-Print-Loop (REPL) for a tiny programming language
+   to illustrate the use of HLVM.
+
+   HLVM and this example compiler are described in detail in the OCaml Journal.
+*)
+
 open Printf
+open Lexing
 open Expr
 open Hlvm
 
@@ -31,47 +38,42 @@ let rec compile = function
       Expr.BinArith(op, compile x, compile y)
   | Cmp(op, x, y) -> Expr.Cmp(op, compile x, compile y)
   | If(p, t, f) -> Expr.If(compile p, compile t, compile f)
-  | LetIn(x, f, g) -> Expr.Let(x, compile f, compile g)
+  | LetIn(patt, body, rest) ->
+      let dummy = "frontend`arg" in
+      Expr.Let(dummy, compile body,
+	       destructure (Expr.Var dummy) (compile rest) patt)
 
 let lexbuf = Lexing.from_channel stdin
 
-open Parse
-
-let token lexbuf =
-  let tok = Lex.token lexbuf in
-  let s =
-    match tok with
-    | LET -> "LET"
-    | REC -> "REC"
-    | IN -> "IN"
-    | IF -> "IF"
-    | THEN -> "THEN"
-    | ELSE -> "ELSE"
-    | PIPE -> "PIPE"
-    | COMMA -> "COMMA"
-    | OPEN -> "OPEN"
-    | CLOSE -> "CLOSE"
-    | LT -> "LT"
-    | LE -> "LE"
-    | EQ -> "EQ"
-    | NE -> "NE"
-    | GE -> "GE"
-    | GT -> "GT"
-    | PLUS -> "PLUS"
-    | MINUS -> "MINUS"
-    | TIMES -> "TIMES"
-    | DIVIDE -> "DIVIDE"
-    | CONS -> "CONS"
-    | INT n -> "INT "^n
-    | FLOAT x -> "FLOAT "^x
-    | IDENT s -> "IDENT \""^s^"\""
-    | SEMI -> "SEMI"
-    | SEMISEMI -> "SEMISEMI"
-    | _ -> "<tok>" in
-  printf "Token: %s\n%!" s;
-  tok
-
 let rec repl() =
+  printf "# %!";
+  let cont =
+    try
+      let f = Parse.toplevel Lex.token lexbuf in
+      (*
+      let ch = open_out "expr.dat" in
+      output_value ch f;
+      close_out ch;
+      *)
+      match f with
+      | None ->
+	  printf "\n";
+	  false
+      | Some(Expr f) ->
+	  Hlvm.eval(`Expr(compile f));
+	  true
+      | Some(Defun(f, p, ty_x, ty_ret, body)) ->
+	  let dummy = "frontend`arg" in
+	  Hlvm.eval(`Function(f, [dummy, ty ty_x], ty ty_ret,
+			      destructure (Expr.Var dummy) (compile body) p));
+	  true
+    with exn ->
+      printf "Error: %s at line %d\n%!"
+	(Printexc.to_string exn) lexbuf.lex_curr_p.pos_lnum;
+      true in
+  if cont then repl()
+
+let () =
   List.iter Hlvm.eval
     [`Extern("putchar", [`Int], `Unit);
      `Function("print_char", ["c", `Int], `Unit,
@@ -81,26 +83,4 @@ let rec repl() =
      `Function("int_of_float", ["x", `Float], `Int,
 	       Expr.IntOfFloat(Expr.Var "x"))
     ];
-  printf "# %!";
-  begin
-    try
-      let f = Parse.toplevel token lexbuf in
-      let ch = open_out "expr.dat" in
-      output_value ch f;
-      close_out ch;
-      match f with
-      | Expr f -> Hlvm.eval(`Expr(compile f))
-      | Defun(f, p, ty_x, ty_ret, body) ->
-	  let dummy = "frontend`arg" in
-	  Hlvm.eval(`Function(f, [dummy, ty ty_x], ty ty_ret,
-			      destructure (Expr.Var dummy) (compile body) p))
-    with exn ->
-      printf "Error: %s\n%!" (Printexc.to_string exn)
-  end;
-  repl()
-
-let () =
-(*
-  Hlvm.debug := true;
-*)
   repl()

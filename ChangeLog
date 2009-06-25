@@ -1,3 +1,12 @@
+Thu Jun 25 02:36:38 BST 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Improved parsing in the example compiler to handle line numbers and
+	EOF.
+	* Improved pattern matching in the example compiler to allow tuples to
+	be deconstructed in "let .. in" bindings as well as function
+	definitions.
+
+
 Sun Jun 21 20:04:48 BST 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Added two examples: a trivial calculator and a rudimentary compiler
