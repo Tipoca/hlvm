@@ -62,7 +62,7 @@ let sieve i : Hlvm.t list =
 		  Unit);
 	       Apply(Var "loop1", [Var "a"; Var "i" +: Int 1]) ]));
      
-     `Expr(Let("a", Alloc(Int i, `Bool),
+     `Expr(Let("a", Alloc(Int i, Bool false),
 	       compound
 		 [ Apply(Var "fill", [Var "a"; Bool true; Int 0]);
 		   Apply(Var "loop1", [Var "a"; Int 2]);
@@ -272,10 +272,9 @@ let fold n : Hlvm.t list =
 	       Struct[GetValue(Var "x", 0) +:
 			Var "y" /: (Float 1.0 +: GetValue(Var "x", 1));
 		      GetValue(Var "x", 1) +: Float 1.]);
-     `Expr(Let("xs", Alloc(Int n, `Float),
+     `Expr(Let("xs", Alloc(Int n, Float 1.0),
 	       compound
-		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
-		   Apply(Var "fold",
+		 [ Apply(Var "fold",
 			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]))]
 
 let fold n : Hlvm.t list =
@@ -294,10 +293,9 @@ let fold n : Hlvm.t list =
 			     Var "xs"])),
 		  Var "y"));
 
-     `Expr(Let("xs", Alloc(Int n, `Float),
+     `Expr(Let("xs", Alloc(Int n, Float 1.0),
 	       compound
-		 [ Apply(Var "fill", [Var "xs"; Float 1.; Int 0]);
-		   Apply(Var "fold_aux",
+		 [ Apply(Var "fold_aux",
 			 [Int 0; Struct[Float 0.; Float 0.]; Var "xs"])]))]
 
 (** Type of a list. *)
@@ -468,13 +466,11 @@ let gc =
 					 Var "b";
 					 Var "i" +: Int 1;
 					 Var "x"]) ],
-		   compound
-		     [ Set(Var "b", Var "i", Var "x");
-		       Var "b" ]));
+		   Var "b"));
 
       `Function("append", ["a", `Array ty; "x", ty], `Array ty,
 		Apply(Var "aux", [Var "a";
-				  Alloc(Length(Var "a") +: Int 1, ty);
+				  Alloc(Length(Var "a") +: Int 1, Var "x");
 				  Int 0;
 				  Var "x"])) ] in
   let q = 16381 in
@@ -604,16 +600,10 @@ let gc =
 					    Var "b";
 					    Var "i" +: Int 1 ]) ]));
 
-      `Expr(Let("a", Alloc(Int q, `Struct[`Int; ty_bkt]),
-		Let("b", Alloc(Int n, `Reference),
+      `Expr(Let("a", Alloc(Int q, Struct[Int 0; null_of ty_bkt]),
+		Let("b", Alloc(Int n, Null),
 		    compound
-		      [ Apply(Var "fill",
-			      [ Var "a";
-				Struct[Int 0;
-				       Alloc(Int 0,
-					     `Struct[`Reference; `Bool])];
-				Int 0 ]);
-			Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
+		      [ Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
 			Apply(Var "loop1", [ Var "a";
 					     Var "b";
 					     Int 0 ]);
@@ -656,7 +646,12 @@ let () =
       queens 8 @
       queens 9 @
       queens 10 @
+      (*
       gc @
+      *)
       [] in
+(*
+  let defs = trace defs in
+*)
   List.iter Hlvm.eval defs;
   Hlvm.save()

@@ -49,6 +49,7 @@ end
 module Expr = struct
   (** Expressions of a first-order intermediate language. *)
   type t =
+    | Null
     | Unit
         (** The value () of the type unit. *)
     | Bool of bool
@@ -72,11 +73,11 @@ module Expr = struct
     | If of t * t * t
         (** An "if" expression. *)
     | Let of string * t * t
-        (** Evaluate the first expression, bind the resulting value to the given
-            variable name and evaluate the last expression. *)
-    | Alloc of t * Type.t
-        (** Allocate an array to store the given number of elements of the given
-            type. The array is initialized to all-bits zero. *)
+        (** Evaluate the first expression, bind the resulting value to the
+	    given variable name and evaluate the last expression. *)
+    | Alloc of t * t
+        (** Allocate and initialize an array the given number of elements and
+	    element value. *)
     | Length of t
         (** Find the length of the given array. *)
     | Get of t * t
@@ -171,6 +172,7 @@ module Expr = struct
     | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
   
   let rec to_string () = function
+    | Null -> "Null"
     | Unit -> "Unit"
     | Bool b -> sprintf "Bool %b" b
     | Int n -> sprintf "Int %d" n
@@ -190,8 +192,8 @@ module Expr = struct
         sprintf "If(%a, %a, %a)" to_string p to_string t to_string f
     | Let(x, f, g) ->
         sprintf "Let(\"%s\", %a, %a)" (String.escaped x) to_string f to_string g
-    | Alloc(f, ty) ->
-        sprintf "Alloc(%a, %a)" to_string f Type.to_string ty
+    | Alloc(f, g) ->
+        sprintf "Alloc(%a, %a)" to_string f to_string g
     | Length f ->
         sprintf "Length(%a)" to_string f
     | Get(a, i) ->
@@ -242,7 +244,7 @@ module Expr = struct
     | Cmp(op, f, g) -> Cmp(op, r f, r g)
     | If(p, t, f) -> If(r p, r t, r f)
     | Let(x, body, rest) -> Let(x, r body, r rest)
-    | Alloc(n, ty) -> Alloc(r n, ty)
+    | Alloc(n, x) -> Alloc(r n, r x)
     | Length e -> Length(r e)
     | Get(a, i) -> Get(r a, r i)
     | Set(a, i, x) -> Set(r a, r i, r x)
@@ -261,6 +263,7 @@ module Expr = struct
     | Visit x -> Visit(r x)
     | Magic(v, ty) -> Magic(r v, ty)
   
+    | Null
     | Unit
     | Bool _
     | Int _
@@ -434,6 +437,17 @@ let float64 x = const_float (lltype_of `Float) x
 
 (** LLVM representation of the NULL pointer. *)
 let null = const_null string_type
+
+(** Create a default value of the given type. *)
+let rec null_of = function
+  | `Unit -> Unit
+  | `Bool -> Bool false
+  | `Int -> Int 0
+  | `Float -> Float 0.0
+  | `Struct tys -> Struct(List.map null_of tys)
+  | `Array ty -> Alloc(Int 0, null_of ty)
+  | `Function(_, _) as ty -> Llvalue(null, ty)
+  | `Reference -> Null
 
 (** Search for a binding and give a comprehensible error if it is not found. *)
 let find k kvs =
@@ -738,6 +752,7 @@ let rec expr vars (state: state) e =
     printf "<- %s\n%!" (string_of_lltype(type_of x));
   ret
 and expr_aux vars state = function
+  | Null -> state, (Ref.mk state null (int 0) null, `Reference)
   | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Int n -> state, (int n, `Int)
@@ -853,13 +868,17 @@ and expr_aux vars state = function
       let state, (f, ty_f) = expr vars state f in
       let state, (g, ty_g) = expr (add_val (x, (f, ty_f)) vars) state g in
       state, (g, ty_g)
-  | Alloc(n, ty) ->
-      let state, (n, ty_n) = expr vars state n in
+  | Alloc(n, x) ->
+      let state, (n, ty_n), (x, ty_x) = expr2 vars state n x in
       type_check "Alloc with non-int length" ty_n `Int;
-      let data = state#malloc (lltype_of ty) n in
-      let a, ty_a = Ref.mk state (mk_array_type ty) n data, `Array ty in
+      let data = state#malloc (lltype_of ty_x) n in
+      let a, ty_a = Ref.mk state (mk_array_type ty_x) n data, `Array ty_x in
       let state = gc_root vars state a ty_a in
       let state = gc_alloc vars state a in
+      let fill = fill vars ty_x in
+      let state, _ = expr vars state (Apply(fill, [Llvalue(a, `Array ty_x);
+						   Llvalue(x, ty_x);
+						   Int 0])) in
       state, (a, ty_a)
   | Length a ->
       let state, (a, ty_a) = expr vars state a in
@@ -969,7 +988,7 @@ and expr_aux vars state = function
 		   compound(List.between (Printf(", ", [])) xs);
 		   Printf(")", []) ])
 	| `Function _ -> expr vars state (Printf("<fun>", []))
-	| `Array _ -> expr vars state (Printf("[|...|]", []))
+	| `Array _
 	| `Reference ->
 	    let llty = extractvalue state f Ref.llty in
 	    let llty = state#bitcast llty (pointer_type RTType.lltype) in
@@ -1302,8 +1321,25 @@ and def_print vars name c ty =
 
 (** Define a function to print an array. *)
 and def_print_array vars ty =
-  let f = "print_array_" ^ Type.to_string () ty in
-  mk_fun vars cc f ["x", `Reference] `Unit (Print(Magic(Var "x", `Array ty)))
+  let f = "print_array<" ^ Type.to_string () ty ^ ">" in
+  let aux = "print_array_aux<" ^ Type.to_string () ty ^ ">" in
+  let aux =
+    mk_fun vars cc aux ["a", `Array ty; "i", `Int] `Unit
+      (compound
+	 [ Print(Get(Var "a", Var "i"));
+	   If(Var "i" <: Length(Var "a") -: Int 1,
+	      compound
+		[ Printf("; ", []);
+		  Apply(Var aux, [Var "a"; Var "i" +: Int 1]) ],
+	      Unit)]) in
+  mk_fun vars cc f ["x", `Reference] `Unit
+    (Let("a", Magic(Var "x", `Array ty),
+	 compound
+	   [ Printf("[|", []);
+	     If(Length(Var "a") =: Int 0, Unit,
+		Apply(Llvalue(aux, `Function([`Array ty; `Int], `Unit)),
+		      [Var "a"; Int 0]));
+	     Printf("|]", [])]))
 
 (** Create and memoize a reference type. Used to create wrapper reference types
     for arrays. *)
@@ -1358,6 +1394,25 @@ and mk_fun vars cc f args ty_ret body =
     let llty, _ = find f vars.vals in
     Hashtbl.add functions f llty;
     llty
+
+(** Define a function to fill an array of the given type. *)
+and fill vars ty =
+  let f = sprintf "fill<%a>" Type.to_string ty in
+  let llvm_f =
+    mk_fun vars cc f [ "a", `Array ty;
+		       "x", ty;
+		       "i", `Int ] `Unit
+      (*
+	(fun vars state ->
+	return vars state
+      *)
+      (If(Var "i" <: Length(Var "a"),
+	  compound
+	    [ Set(Var "a", Var "i", Var "x");
+	      Apply(Var f, [Var "a"; Var "x"; Var "i" +: Int 1]) ],
+	  Unit)) in
+  Llvalue(llvm_f, `Function([`Array ty; ty; `Int], `Unit))
+
 (*
 (* A larger hash table improves performance on large heaps but degrades
    performance on small heaps. *)
@@ -1428,13 +1483,13 @@ let init() =
 	 let n = 1 lsl 25 in
 	 let body =
 	   compound
-	     [ Store(stack, Alloc(Int n, `Reference));
-	       Store(visit_stack, Alloc(Int n, `Reference));
-	       Store(allocated, Alloc(Int q, `Struct[`Int; ty_bkt]));
-	       Apply(Var "fill",
-		     [ Load(allocated, `Array(`Struct[`Int; ty_bkt]));
-		       Struct[Int 0; Alloc(Int 0, `Struct[`Int; `Bool])];
-		       Int 0 ]) ] in
+	     [ Store(stack, Alloc(Int n, Null));
+	       Store(visit_stack, Alloc(Int n, Null));
+	       Store(allocated,
+		     Alloc(Int q,
+			   Struct[Int 0;
+				  Alloc(Int 0,
+					Struct[Int 0; Bool false])])) ] in
 	 return vars state body `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
@@ -1463,7 +1518,8 @@ let append ty =
        Apply(Var "append_aux", [Var "a";
 				Alloc(If(Length(Var "a") =: Int 0,
 					 Int 2,
-					 Int 2 *: Length(Var "a")), ty);
+					 Int 2 *: Length(Var "a")),
+				      null_of ty);
 				Int 0;
 				Var "x"])) ]
 
