@@ -338,19 +338,7 @@ let list n : Hlvm.t list =
       `Expr(Let("list", Apply(Var "init", [nil; Int n]),
 		Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])));
       
-      `Expr(Apply(Var "init", [nil; Int 10]));
-
-      `Function("print", ["x", `Reference], `Unit,
-		compound
-		  [ Printf("Visiting: ", []);
-		    Print(AddressOf(Var "x"));
-		    Printf(" ", []);
-		    Print(Var "x");
-		    Printf("\n", []);
-		    Apply(Visit(Var "x"), [Var "print"; Var "x"]) ]);
-
-      `Expr(Let("list", Apply(Var "init", [nil; Int 10]),
-		Apply(Visit(Var "list"), [Var "print"; Var "list"])))]
+      `Expr(Apply(Var "init", [nil; Int 10]))]
 
 (** Type of a closure. *)
 let ty_closure(ty1, ty2) =
@@ -631,7 +619,8 @@ let rec trace : Hlvm.t list -> Hlvm.t list = function
 (** Main program. *)
 let () =
   let defs =
-    fib @
+    [`Expr(Int 3)] @
+      fib @
       ffib @
       sieve 100000000 @
       mandelbrot 77 @
@@ -646,9 +635,7 @@ let () =
       queens 8 @
       queens 9 @
       queens 10 @
-      (*
       gc @
-      *)
       [] in
 (*
   let defs = trace defs in

@@ -124,6 +124,12 @@ module Expr = struct
             types: arrays and boxed values. *)
     | Return of t * Type.t
         (** For internal use only. Used to propagate tail calls. *)
+    | GetMark of t
+        (** For internal use only. Get the mark byte of a reference type. *)
+    | SetMark of t * int
+        (** For internal use only. Set the mark byte of a reference type. *)
+    | Time
+	(** Read the current time as a `Float. *)
   
   (** Helper operators. *)
   let ( <: ) f g = Cmp(`Lt, f, g)
@@ -234,8 +240,14 @@ module Expr = struct
         sprintf "Llvalue(<llvalue>, %a)" Type.to_string ty
     | Magic(f, ty) ->
         sprintf "Magic(%a, %a)" to_string f Type.to_string ty
+    | GetMark f ->
+        sprintf "GetMark(%a)" to_string f
+    | SetMark(f, n) ->
+        sprintf "SetMark(%a, %d)" to_string f n
+    | Time -> "Time"
   and to_strings sep = list_to_string to_string sep
   
+  (** Apply the given rule to the next level of subexpressions. *)
   let rec rewrite r = function
     | Struct es -> Struct(List.map r es)
     | GetValue(e, i) -> GetValue(r e, i)
@@ -262,7 +274,9 @@ module Expr = struct
     | Return(x, ty) -> Return(r x, ty)
     | Visit x -> Visit(r x)
     | Magic(v, ty) -> Magic(r v, ty)
-  
+    | GetMark v -> GetMark(r v)
+    | SetMark(v, n) -> SetMark(r v, n)
+    
     | Null
     | Unit
     | Bool _
@@ -271,11 +285,17 @@ module Expr = struct
     | Var _
     | Load _
     | Store _
-    | Llvalue _ as e -> e
+    | Llvalue _
+    | Time as e -> e
   
   let rec unroll_rule f params body = function
-    | Let(x, body, rest) as e when x=f -> e
+    | Let(x, body, rest) as e when x=f ->
+	(* If this function's name is shadowed by a "let"-binding then stop
+	   rewriting subexpressions. *)
+	e
     | Apply(Var g, args) when f=g ->
+	(* Replace recursive calls with a "let"-binding of the arguments and
+	   a copy of the function body. *)
         let rec aux (i, t) param =
           i+1, Let(param, GetValue(Var " args", i), t) in
         let _, body = List.fold_left aux (0, body) params in
@@ -316,18 +336,26 @@ let view = ref false
     generated code. Enabled by the command-line argument "--debug". *)
 let debug = ref false
 
-(** Binding to the LLVM extractvalue instruction. *)
-external build_extractvalue :
-  llvalue -> int -> string -> llbuilder -> llvalue =
-      "llvm_build_extractvalue"
-
-(** Binding to the LLVM insertvalue instruction. *)
-external build_insertvalue :
-  llvalue -> llvalue -> int -> string -> llbuilder -> llvalue =
-      "llvm_build_insertvalue"
-
 (** Binding to a function that enables TCO in LLVM. *)
 external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
+
+let llcontext = create_context()
+
+let void_type = void_type llcontext
+
+let struct_type = struct_type llcontext
+
+let i1_type = i1_type llcontext
+
+let i8_type = i8_type llcontext
+
+let i32_type = i32_type llcontext
+
+let i64_type = i64_type llcontext
+
+let float_type = float_type llcontext
+
+let double_type = double_type llcontext
 
 (** Create an aggregate register (a struct) containing the given llvalues. *)
 let mk_struct state vs =
@@ -364,7 +392,7 @@ let is_ref_type = function
 module Ref = struct
   (** Run-time representation of values of reference types as an LLVM type. *)
   let lltype =
-    struct_type[|string_type; int_type; string_type|]
+    struct_type[|string_type; int_type; string_type; string_type|]
 
   (** Index of the field containing the pointer to the run-time type. *)
   let llty = 0
@@ -375,12 +403,16 @@ module Ref = struct
   (** Index of the field containing the pointer to allocated data. *)
   let data = 2
 
+  (** Index of the field containing the pointer to the mark bit. *)
+  let mark = 3
+
   (** Construct a reference type with the given run-time type, metadata and
       allocated data. *)
-  let mk state llty tag data =
+  let mk state llty tag data mark =
     mk_struct state [ state#bitcast llty string_type;
 		      tag;
-		      state#bitcast data string_type ]
+		      state#bitcast data string_type;
+		      mark ]
 end
 
 (** Convert a type from our type system into LLVM's type system. *)
@@ -409,11 +441,13 @@ and struct_type_of tys =
 
 (** Run-time types. *)
 module RTType = struct
+  let ty_visit = `Function([`Reference], `Unit)
+  let ty_print = `Function([`Reference], `Unit)
+
   (** The lltype of our run-time types. *)
   let lltype =
     lltype_of
-      (`Struct[ `Function([`Function([`Reference], `Unit);
-			   `Reference], `Unit);
+      (`Struct[ `Function([`Reference], `Unit);
 		`Function([`Reference], `Unit) ])
 
   let visit = 0
@@ -428,6 +462,9 @@ let unit = undef string_type
 
 (** Create an LLVM native int. *)
 let int n = const_int int_type n
+
+(** Create an LLVM 8-bit int. *)
+let int8 n = const_int i8_type n
 
 (** Create an LLVM 32-bit int. *)
 let int32 n = const_int i32_type n
@@ -458,13 +495,15 @@ let find k kvs =
 
 
 (** Global LLVM module. *)
-let m = create_module "toplevel"
+let m = create_module llcontext "toplevel"
 
 (** Global LLVM module provider. *)
 let mp = ModuleProvider.create m
 
 (** Global LLVM execution engine. *)
-let ee = ExecutionEngine.create mp
+let ee =
+  ignore(Llvm_executionengine.initialize_native_target());
+  ExecutionEngine.create_jit mp
 
 (** The shadow stack is an array of reference types. *)
 (* FIXME: Should be dynamically resized. *)
@@ -482,14 +521,9 @@ let visit_stack =
 (** Number of unvisited references on the visit stack. *)
 let n_visit = define_global "n_visit" (int 0) m
 
-(** The allocated list is an array of reference types and their boolean
-    states (marked or unmarked). *)
+(** The allocated list is an array of reference types. *)
 let allocated =
-  define_global "allocated"
-    (const_null(lltype_of(`Array(`Struct[`Int;`Array(`Struct[`Reference; `Bool])])))) m
-(*
-    (const_null(lltype_of(`Array(`Array(`Struct[`Reference; `Bool]))))) m
-*)
+  define_global "allocated" (const_null (lltype_of(`Array `Reference))) m
 
 (** Number of allocated references. *)
 let n_allocated = define_global "n_allocated" (int 0) m
@@ -592,7 +626,7 @@ class state func = object (self : 'self)
 
   (** Get an LLVM instruction builder to insert instructions at the end of the
       current LLVM instruction block. *)
-  method bb = builder_at_end blk
+  method bb = builder_at_end llcontext blk
 
   (** Issue an LLVM get element pointer instruction. *)
   method gep a ns = build_gep a (Array.of_list ns) "" self#bb
@@ -620,7 +654,7 @@ class state func = object (self : 'self)
 
   (** Create a new instruction block and return a new state that will insert
       instructions into it. *)
-  method mk s = ({< blk = append_block s func >} : 'self)
+  method mk s = ({< blk = append_block llcontext s func >} : 'self)
 
   (** Issue an LLVM return instruction. *)
   method ret v = ignore(build_ret v self#bb)
@@ -642,7 +676,7 @@ class state func = object (self : 'self)
 
   (** Issue an LLVM alloca instruction to allocate on the stack. *)
   method alloca ty =
-    build_alloca ty "" (builder_at_end(entry_block func))
+    build_alloca ty "" (builder_at_end llcontext (entry_block func))
 
   (** Are we emitting code to keep the GC informed. *)
   method gc_enabled = gc_enabled
@@ -722,7 +756,7 @@ let string_cache = Hashtbl.create 1
 (** Memoize a string. *)
 let mk_string string =
   try Hashtbl.find string_cache string with Not_found ->
-    let spec = define_global "buf" (const_stringz string) m in
+    let spec = define_global "buf" (const_stringz llcontext string) m in
     Hashtbl.add string_cache string spec;
     spec
 
@@ -736,6 +770,16 @@ let run_function llf =
   (* We pass a single dummy argument because the current OCaml bindings in
      LLVM are broken if no arguments are passed (they call malloc(0)). *)
   ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee
+
+(* Push a reference onto the visit stack. *)
+let gc_push p =
+  Let("p", p,
+      If(AddressOf(Var "p") =: Int 0, Unit,
+	 Let("a", Load(visit_stack, `Array `Reference),
+	     Let("n", Load(n_visit, `Int),
+		 compound
+		   [ Set(Var "a", Var "n", Var "p");
+		     Store(n_visit, Var "n" +: Int 1) ]))))
 
 (** Compile an expression in the context of current vars into the given
     LLVM state. *)
@@ -752,7 +796,7 @@ let rec expr vars (state: state) e =
     printf "<- %s\n%!" (string_of_lltype(type_of x));
   ret
 and expr_aux vars state = function
-  | Null -> state, (Ref.mk state null (int 0) null, `Reference)
+  | Null -> state, (Ref.mk state null (int 0) null null, `Reference)
   | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Int n -> state, (int n, `Int)
@@ -775,11 +819,13 @@ and expr_aux vars state = function
       type_check "Type constructor argument of wrong type" ty ty_x;
       let state, s =
 	match ty_x with
-	| `Unit -> state, Ref.mk state llty (int 0) null
+	| `Unit -> state, Ref.mk state llty (int 0) null null
 	| _ ->
 	    let px = state#malloc (lltype_of ty_x) (int 1) in
 	    state#store px [int 0] x;
-	    let s = Ref.mk state llty (int 0) px in
+	    let mark = state#malloc i8_type (int 1) in
+	    state#store mark [int 0] (int8 0);
+	    let s = Ref.mk state llty (int 0) px mark in
 	    let state = gc_root vars state s `Reference in
 	    let state = gc_alloc vars state s in
 	    state, s in
@@ -872,7 +918,9 @@ and expr_aux vars state = function
       let state, (n, ty_n), (x, ty_x) = expr2 vars state n x in
       type_check "Alloc with non-int length" ty_n `Int;
       let data = state#malloc (lltype_of ty_x) n in
-      let a, ty_a = Ref.mk state (mk_array_type ty_x) n data, `Array ty_x in
+      let mark = state#malloc i8_type (int 1) in
+      let a = Ref.mk state (mk_array_type ty_x) n data mark in
+      let ty_a = `Array ty_x in
       let state = gc_root vars state a ty_a in
       let state = gc_alloc vars state a in
       let fill = fill vars ty_x in
@@ -1007,18 +1055,20 @@ and expr_aux vars state = function
 	    let llty = state#bitcast llty (pointer_type RTType.lltype) in
 	    let llty = state#load llty [int 0] in
 	    let p = extractvalue state llty RTType.visit in
-	    state, (p, `Function([`Function([`Reference], `Unit);
-				  `Reference], `Unit))
+	    state, (p, RTType.ty_visit)
 	| ty -> invalid_arg "Visit of non-reference"
       end
   | Free f ->
       let state, (f, ty_f) = expr vars state f in
-      let data = match ty_f with
+      begin
+	match ty_f with
 	| `Array _ | `Reference ->
-	    extractvalue state f Ref.data
-	| `Int -> state#ptr_of_int f string_type
-	| _ -> invalid_arg "Free of non-(array|reference|int)" in
-      state#free data;
+	    state#free (extractvalue state f Ref.data);
+	    state#free (extractvalue state f Ref.mark);
+	| `Int ->
+	    state#free (state#ptr_of_int f string_type);
+	| _ -> invalid_arg "Free of non-(array|reference|int)"
+      end;
       state, (unit, `Unit)
   | Exit f ->
       let state, (f, ty_f) = expr vars state f in
@@ -1050,6 +1100,18 @@ and expr_aux vars state = function
       end else
 	state#ret f;
       raise Returned
+  | GetMark f ->
+      let state, (f, ty_f) = expr vars state f in
+      let mark = extractvalue state f Ref.mark in
+      let mark = state#load mark [int 0] in
+      let mark = build_sext mark int_type "int_of_mark" state#bb in
+      state, (mark, `Int)
+  | SetMark(f, n) ->
+      let state, (f, ty_f) = expr vars state f in
+      let mark = extractvalue state f Ref.mark in
+      state#store mark [int 0] (int8 n);
+      state, (unit, `Unit)
+  | Time -> state, (state#time, `Float)
 
 (** Compile two expressions. *)
 and expr2 vars state f g =
@@ -1103,8 +1165,13 @@ and gc_alloc vars state v =
   if not state#gc_enabled then state else
     let state, _ =
       expr vars state
-	(compound [ Apply(Var "gc_add", [Llvalue(v, `Reference)]);
-		    Store(n_allocated, Load(n_allocated, `Int) +: Int 1) ]) in
+	(Let("p", Llvalue(v, `Reference),
+	     If(AddressOf(Var "p") =: Int 0, Unit,
+		Let("n", Load(n_allocated, `Int),
+		    compound
+		      [ Set(Load(allocated, `Array `Reference), Var "n",
+			    Var "p");
+			Store(n_allocated, Var "n" +: Int 1) ])))) in
     state
 
 (** Define a function with the given calling convention, name, arguments
@@ -1166,7 +1233,7 @@ and def vars = function
 	   let state, _ =
 	     expr vars state
 	       (If(Load(n_allocated, `Int) <=: Load(quota, `Int), Unit,
-		   Apply(Var "gc", []))) in
+		   Apply(Var "gc", [Unit]))) in
 	   return vars state body ty_ret)
   | `Expr f ->
       if !debug then
@@ -1204,6 +1271,9 @@ and def vars = function
 	       state#call CallConv.c stackoverflow_install_handler
 		 [llvm_handler; stack; int size] in
 	     let t1 = Llvalue(state#time, `Float) in
+	     let state, _ =
+	       if not !debug then state, (unit, `Unit) else
+		 expr vars state (Printf("# "^Expr.to_string () f^"\n", [])) in
 	     let state, (f, ty_f) = expr vars state f in
 	     let f =
 	       compound
@@ -1215,7 +1285,7 @@ and def vars = function
 	     let state, _ =
 	       expr vars state
 		 (Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
-	     let state, _ = expr vars state (Apply(Var "gc", [])) in
+	     let state, _ = expr vars state (Apply(Var "gc", [Unit])) in
 	     let t2 = Llvalue(state#time, `Float) in
 	     let state, _ =
 	       expr vars state (Printf("Took %fs\n", [t2 -: t1])) in
@@ -1263,53 +1333,46 @@ and def vars = function
 (** Define a function to traverse a reference. *)
 and def_visit vars name c ty =
   let f = "visit_" ^ name in
-  let body, vars = visit vars (Var "g") (Var "x") ty in
+  let body, vars = visit vars (Var "x") ty in
   let vars =
     def vars
-      (`UnsafeFunction(f, ["g", `Function([`Reference], `Unit);
-			   "x", `Reference], `Unit,
+      (`UnsafeFunction(f, ["x", `Reference], `Unit,
 		       Let("x", Cast(Var "x", c), body))) in
   let llvisit, _ = List.assoc f vars.vals in
   llvisit
 
 (** Generate an expression that applies the function "f" to every value of a
     reference type in the value "v". *)
-and visit vars f v = function
+and visit vars v = function
   | `Unit | `Bool | `Int | `Float | `Function _ -> Unit, vars
   | `Struct tys ->
       let f (i, (fs, vars)) ty =
-	let f, vars = visit vars f (GetValue(v, i)) ty in
+	let f, vars = visit vars (GetValue(v, i)) ty in
 	i+1, (f::fs, vars) in
       let _, (fs, vars) = List.fold_left f (0, ([], vars)) tys in
       compound fs, vars
-  | `Array _ -> Apply(f, [Magic(v, `Reference)]), vars
-  | `Reference -> Apply(f, [v]), vars
+  | `Array _ -> gc_push(Magic(v, `Reference)), vars
+  | `Reference -> gc_push v, vars
 
 (** Define a function that visits every value of a reference type in an
     array. *)
 and def_visit_array vars ty =
   let f = "visit_array_"^Type.to_string () ty in
-  let body, vars = visit vars (Var "g") (Get(Var "a", Var "i")) ty in
+  let body, vars = visit vars (Get(Var "a", Var "i")) ty in
   if body = Unit then
-    mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
-		       "a", `Reference ] `Unit
-      Unit
+    mk_fun vars cc f [ "a", `Reference ] `Unit Unit
   else
     let llvisitaux =
       let f = f^"aux" in
-      mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
-			 "a", `Array ty;
+      mk_fun vars cc f [ "a", `Array ty;
 			 "i", `Int ] `Unit
 	(If(Var "i" =: Length(Var "a"), Unit,
 	    compound
-	      [body;
-	       Apply(Var f, [Var "g"; Var "a"; Var "i" +: Int 1])])) in
-    mk_fun vars cc f [ "g", `Function([`Reference], `Unit);
-		       "a", `Reference ] `Unit
-      (Apply(Llvalue(llvisitaux, `Function([`Function([`Reference], `Unit);
-					    `Array ty;
-					    `Int], `Unit)),
-	     [Var "g"; Magic(Var "a", `Array ty); Int 0]))
+	      [ body;
+	        Apply(Var f, [Var "a"; Var "i" +: Int 1]) ])) in
+    mk_fun vars cc f [ "a", `Reference ] `Unit
+      (Apply(Llvalue(llvisitaux, `Function([`Array ty; `Int], `Unit)),
+	     [Magic(Var "a", `Array ty); Int 0]))
 
 (** Define a function to print a boxed value. *)
 and def_print vars name c ty =
@@ -1374,12 +1437,18 @@ and init_type name llty llvisit llprint =
   let vars =
     defun vars CallConv.c f ["", `Int] `Unit
       (fun vars state ->
+	 let state, _ =
+	   if not !debug then state, (unit, `Unit) else
+	     expr vars state (Printf(f^"()\n", [])) in
 	 let s =
 	   Struct
 	     [ Llvalue(llvisit, `Function([`Function([`Reference], `Unit);
 					   `Reference], `Unit));
 	       Llvalue(llprint, `Function([`Reference], `Unit)) ] in
 	 let state, _ = expr vars state (Store(llty, s)) in
+	 let state, _ =
+	   if not !debug then state, (unit, `Unit) else
+	     expr vars state (Printf(f^" end\n", [])) in
 	 return vars state Unit `Unit) in
   let llvm_f, _ = List.assoc f vars.vals in
   ignore(run_function llvm_f)
@@ -1402,10 +1471,6 @@ and fill vars ty =
     mk_fun vars cc f [ "a", `Array ty;
 		       "x", ty;
 		       "i", `Int ] `Unit
-      (*
-	(fun vars state ->
-	return vars state
-      *)
       (If(Var "i" <: Length(Var "a"),
 	  compound
 	    [ Set(Var "a", Var "i", Var "x");
@@ -1413,48 +1478,20 @@ and fill vars ty =
 	  Unit)) in
   Llvalue(llvm_f, `Function([`Array ty; ty; `Int], `Unit))
 
-(*
-(* A larger hash table improves performance on large heaps but degrades
-   performance on small heaps. *)
-(*                 list  queens *)
-let q = 997    (* 20.94s 23.19s *)
-let q = 2047   (* 10.77s 22.57s *)
-let q = 4093   (*  6.18s 27.39s *)
-let q = 9973   (*  3.62s 31.19s *)
-let q = 16381  (*  2.95s 36.65s *)
-let q = 30011  (*  2.54s 50.18s *)
-let q = 524287 (*  2.16s 74.92s *)
-*)
-(** Number of buckets in the hash table used by the GC. *)
-let q = 8191   (*  3.96s 30.78s *)
-
-(** Type of a hash table bucket. *)
-let ty_bkt = `Array(`Struct[`Int; `Bool])
-
-(** Unsafe function to fill an array. *)
-let fill ty =
-  `UnsafeFunction
-    ("fill", [ "a", `Array ty;
-	       "x", ty;
-	       "i", `Int ], `Unit,
-     If(Var "i" <: Length(Var "a"),
-	compound
-	  [ Set(Var "a", Var "i", Var "x");
-	    Apply(Var "fill", [Var "a"; Var "x"; Var "i" +: Int 1]) ],
-	Unit))
-
 (** Dynamically load the runtime and initialize the shadow stack and GC. *)
 let init() =
   if !debug then
     eprintf "init()\n%!";
   let f_name = "init_runtime" in
-  let vars' = def vars (fill(`Struct[`Int; ty_bkt])) in
   let vars' =
-    defun vars' CallConv.c f_name ["", `Int] `Unit
+    defun vars CallConv.c f_name ["", `Int] `Unit
       (fun vars state ->
 	 let state = state#no_gc in
+	 let state, _ =
+	   if not !debug then state, (unit, `Unit) else
+	     expr vars state (Printf("init_runtime()\n", [])) in
 	 let str s =
-	   let str = state#define_global "str" (const_stringz s) in
+	   let str = state#define_global "str" (const_stringz llcontext s) in
 	   state#gep str [int32 0; int 0] in
 	 let libruntime =
 	   state#call CallConv.c lldlopen [str "./libruntime.so"; int 1] in
@@ -1480,215 +1517,121 @@ let init() =
 	   (state#bitcast
 	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_time"])
 	      lltime_ty);
-	 let n = 1 lsl 25 in
-	 let body =
-	   compound
-	     [ Store(stack, Alloc(Int n, Null));
-	       Store(visit_stack, Alloc(Int n, Null));
-	       Store(allocated,
-		     Alloc(Int q,
-			   Struct[Int 0;
-				  Alloc(Int 0,
-					Struct[Int 0; Bool false])])) ] in
-	 return vars state body `Unit) in
+	 let n = 1 lsl 22 in
+	 let state, _ =
+	   compound [ Store(stack, Alloc(Int n, Null));
+		      Store(visit_stack, Alloc(Int n, Null));
+		      Store(allocated, Alloc(Int n, Null)) ] in
+	 let state, _ =
+	   if not !debug then state, (unit, `Unit) else
+	     expr vars state (Printf("init_runtime end\n", [])) in
+	 return vars state Unit `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
     run_function llvm_f in
   vars
 
-let append ty =
-  [ `UnsafeFunction("append_aux", ["a", `Array ty;
-				   "b", `Array ty;
-				   "i", `Int;
-				   "x", ty], `Array ty,
-		    If(Var "i" <: Length(Var "a"),
-		       compound
-			 [ Set(Var "b", Var "i", Get(Var "a", Var "i"));
-			   Apply(Var "append_aux", [Var "a";
-						    Var "b";
-						    Var "i" +: Int 1;
-						    Var "x"]) ],
-		       compound
-			 [ Set(Var "b", Var "i", Var "x");
-			   If(Var "i" >: Int 1, Free(Var "a"), Unit);
-			   Var "b" ]));
-
-    `UnsafeFunction
-      ("append", ["a", `Array ty; "x", ty], `Array ty,
-       Apply(Var "append_aux", [Var "a";
-				Alloc(If(Length(Var "a") =: Int 0,
-					 Int 2,
-					 Int 2 *: Length(Var "a")),
-				      null_of ty);
-				Int 0;
-				Var "x"])) ]
-
-let boot : t list = 
+let boot : t list =
   let printf(x, y) =
     if !debug then Printf(x, y) else Unit in
-  let hash addr = (addr /: Int 512) %: Int q in
-  append (`Struct[`Int; `Bool]) @
-    [ `UnsafeFunction
-	("gc_clear1", [ "a", ty_bkt; "i", `Int; "n", `Int ], `Unit,
-	 If(Var "i" =: Var "n", Unit,
-	    compound
-	      [ Let("x", Get(Var "a", Var "i"),
-		    Set(Var "a", Var "i",
-			Struct[GetValue(Var "x", 0); Bool false]));
-		Apply(Var "gc_clear1", [ Var "a";
-					 Var "i" +: Int 1;
-					 Var "n" ]) ]));
 
-      `UnsafeFunction
-	("gc_clear", [ "a", `Array(`Struct[`Int; ty_bkt]);
-		       "i", `Int ], `Unit,
-	 If(Var "i" =: Length(Var "a"), Unit,
-	    compound
-	      [ Let("nb", Get(Var "a", Var "i"),
-		    Apply(Var "gc_clear1", [ GetValue(Var "nb", 1);
-					     Int 0;
-					     GetValue(Var "nb", 0) ]));
-		Apply(Var "gc_clear", [Var "a"; Var "i" +: Int 1]) ]));
+  let getMark f =
+    If(AddressOf f =: Int 0,
+       compound
+	 [ Printf("GetMark(null)\n", []);
+	   Printf("GetMark(", []);
+	   Print f;
+	   Printf(")\n", []);
+	   Exit(Int 1);
+	   Int 0 ],
+       GetMark f) in
+  let setMark(f, n) =
+    If(AddressOf f =: Int 0,
+       compound
+	 [ Printf("SetMark(null)\n", []);
+	   Exit(Int 1) ],
+       SetMark(f, n)) in
+
+  let getMark f = GetMark f in
+  let setMark(f, n) = SetMark(f, n) in
+
+  (* If the given reference is non-null and unmarked then mark it and push
+     its child references onto the visit stack. *)
+  let mark_one p =
+    Let("p", p,
+	If(getMark(Var "p") =: Int 1, Unit,
+	   compound
+	     [ setMark(Var "p", 1);
+	       Apply(Visit(Var "p"), [Var "p"]) ])) in
+  
+  [ (* Mark the whole heap: while the visit stack is non-empty, pop a
+       reference and mark it. *)
+    `UnsafeFunction
+      ("gc_mark_all", ["", `Unit], `Unit,
+       Let("n", Load(n_visit, `Int) -: Int 1,
+	   If(Var "n" <: Int 0, Unit,
+	      Let("a", Load(visit_stack, `Array `Reference),
+		  compound
+		    [ Store(n_visit, Var "n");
+		      mark_one(Get(Var "a", Var "n"));
+		      Apply(Var "gc_mark_all", [Unit]) ]))));
+    
+    (* Mark all roots on the shadow stack and then mark the whole heap. *)
+    `UnsafeFunction
+      ("gc_mark", ["i", `Int], `Unit,
+       Let("d", Load(stack_depth, `Int),
+	   If(Var "i" =: Var "d", Apply(Var "gc_mark_all", [Unit]),
+	      Let("s", Load(stack, `Array `Reference),
+		  compound
+		    [ Let("p", Get(Var "s", Var "i"),
+			  If(AddressOf(Var "p") =: Int 0, Unit,
+			     mark_one(Var "p")));
+		      Apply(Var "gc_mark", [Var "i" +: Int 1]) ]))));
+
+    (* Search the allocated list for unmarked references and free them,
+       shrinking the allocated list if it is non-empty by overwriting the
+       freed reference with the last reference. Reset marked references to
+       unmarked. *)
+    `UnsafeFunction
+      ("gc_sweep", ["i", `Int], `Unit,
+       Let("n", Load(n_allocated, `Int),
+	   If(Var "i" >=: Var "n", Unit,
+	      Let("a", Load(allocated, `Array `Reference),
+		  Let("p", Get(Var "a", Var "i"),
+		      If(getMark(Var "p") =: Int 1,
+			 compound
+			   [ setMark(Var "p", 0);
+			     Apply(Var "gc_sweep", [Var "i" +: Int 1]) ],
+			 compound
+			   [ Free(Var "p");
+			     Set(Var "a", Var "i",
+				 Get(Var "a", Var "n" -: Int 1));
+			     Store(n_allocated, Var "n" -: Int 1);
+			     Apply(Var "gc_sweep", [Var "i"]) ]))))));
+    
+    (* Clear, mark and sweep. *)
+    `UnsafeFunction
+      ("gc", ["", `Unit], `Unit,
+       compound
+	 [ Apply(Var "gc_mark", [Int 0]);
+	   Apply(Var "gc_sweep", [Int 0]);
+	   Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int)) ])
       
-      `UnsafeFunction("abs", ["n", `Int], `Int,
-		      If(Var "n" >=: Int 0, Var "n", Int 0 -: Var "n"));
-
-      (* Add the reference to the hash table of allocated values. *)
-      `UnsafeFunction
-	("gc_add", [ "p", `Reference ], `Unit,
-	 Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-	     Let("p", AddressOf(Var "p"),
-		 Let("h", Apply(Var "abs", [ hash(Var "p") ]),
-		     Set(Var "a", Var "h",
-			 Let("nb", Get(Var "a", Var "h"),
-			     Let("n", GetValue(Var "nb", 0),
-				 Let("b", GetValue(Var "nb", 1),
-				     If(Var "n" <: Length(Var "b"),
-					compound
-					  [ Set(Var "b", Var "n",
-						Struct[Var "p"; Bool false]);
-					    Struct[Var "n" +: Int 1;
-						   Var "b"] ],
-					Struct
-					  [ Var "n" +: Int 1;
-					    Apply(Var "append",
-						  [ Var "b";
-						    Struct[Var "p";
-							   Bool false ] ])]
-				       )))))))));
-
-      `UnsafeFunction
-	("gc_mark1", [ "a", ty_bkt;
-		       "p", `Int;
-		       "i", `Int ], `Bool,
-	 Let("n", Length(Var "a"),
-	     If(Var "i" =: Var "n",
-		compound
-		  [ Printf("WARNING: Pointer not found: %d\n", [ Var "p" ]);
-		    Bool false ],
-		Let("p2", Get(Var "a", Var "i"),
-		    If(GetValue(Var "p2", 0) =: Var "p",
-		       If(GetValue(Var "p2", 1), Bool false,
-			  compound
-			    [ Set(Var "a", Var "i",
-				  Struct[ Var "p";
-					  Bool true ]);
-			      Bool true ]),
-		       Apply(Var "gc_mark1", [ Var "a";
-					       Var "p";
-					       Var "i" +: Int 1 ]))))));
-
-      (* Push a reference onto the visit stack. *)
-      `UnsafeFunction
-	("gc_push", ["p", `Reference], `Unit,
-	 If(AddressOf(Var "p") =: Int 0, Unit,
-	    Let("a", Load(visit_stack, `Array `Reference),
-		Let("n", Load(n_visit, `Int),
-		    compound
-		      [ Set(Var "a", Var "n", Var "p");
-			Store(n_visit, Var "n" +: Int 1) ]))));
-      
-      (* Mark this reference in the allocated list and, if it was freshly
-	 marked, traverse its children. *)
-      `UnsafeFunction
-	("gc_mark", [ "p", `Reference ], `Unit,
-	 If(AddressOf(Var "p") =: Int 0, Unit,
-	    compound
-	      [ Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-		    Let("h", Apply(Var "abs", [ hash(AddressOf(Var "p")) ]),
-			If(Apply(Var "gc_mark1",
-				 [ GetValue(Get(Var "a", Var "h"), 1);
-				   AddressOf(Var "p");
-				   Int 0 ]),
-			   Apply(Visit(Var "p"), [Var "gc_push"; Var "p"]),
-			   Unit)));
-
-		Let("n", Load(n_visit, `Int) -: Int 1,
-		    If(Var "n" <: Int 0, Unit,
-		       Let("a", Load(visit_stack, `Array `Reference),
-			   compound
-			     [ Store(n_visit, Var "n");
-			       Apply(Var "gc_mark",
-				     [Get(Var "a", Var "n")]) ]))) ]));
-      
-      (* Mark all roots on the shadow stack. *)
-      `UnsafeFunction
-	("gc_markall", ["i", `Int], `Unit,
-	 Let("s", Load(stack, `Array `Reference),
-	     Let("d", Load(stack_depth, `Int),
-		 If(Var "i" =: Var "d", Unit,
-		    compound
-		      [ Apply(Var "gc_mark", [Get(Var "s", Var "i")]);
-			Apply(Var "gc_markall", [Var "i" +: Int 1]) ]))));
-
-      `UnsafeFunction
-	("gc_sweep1", [ "a", ty_bkt; "i", `Int; "n", `Int ],
-	 `Struct[`Int; ty_bkt],
-	 If(Var "i" =: Var "n", Struct[Var "n"; Var "a"],
-	    Let("p", Get(Var "a", Var "i"),
-		compound
-		  [ If(GetValue(Var "p", 1),
-		       Apply(Var "gc_sweep1", [ Var "a";
-						Var "i" +: Int 1;
-						Var "n" ]),
-		       compound
-			 [ Store(n_allocated,
-				 Load(n_allocated, `Int) -: Int 1);
-			   Free(GetValue(Var "p", 0));
-			   Set(Var "a", Var "i",
-			       Get(Var "a", Var "n" -: Int 1));
-			   Apply(Var "gc_sweep1", [ Var "a";
-						    Var "i";
-						    Var "n" -: Int 1 ]) ])])));
-
-      `UnsafeFunction
-	("gc_sweep", [ "a", `Array(`Struct[`Int; ty_bkt]);
-		       "i", `Int ], `Unit,
-	 If(Var "i" =: Length(Var "a"), Unit,
-	    compound
-	      [ Set(Var "a", Var "i",
-		    Let("nb", Get(Var "a", Var "i"),
-			Apply(Var "gc_sweep1",
-			      [ GetValue(Var "nb", 1);
-				Int 0;
-				GetValue(Var "nb", 0) ])));
-		Apply(Var "gc_sweep", [ Var "a";
-					Var "i" +: Int 1 ]) ]));
-
-      (* Clear, mark and sweep. *)
-      `UnsafeFunction
-	("gc", [], `Unit,
-	 Let("a", Load(allocated, `Array(`Struct[`Int; ty_bkt])),
-	     compound
-	       [ printf("GC clearing...\n", []);
-		 Apply(Var "gc_clear", [Var "a"; Int 0]);
-		 printf("GC marking...\n", []);
-		 Apply(Var "gc_markall", [Int 0]);
-		 printf("GC sweeping...\n", []);
-		 Apply(Var "gc_sweep", [Var "a"; Int 0]);
-		 printf("GC done.\n", []);
-		 Store(quota,
-		       Int 8192 +: Int 2 *: Load(n_allocated, `Int))])) ]
+    (* Clear, mark and sweep. *)
+    `UnsafeFunction
+      ("gc", ["", `Unit], `Unit,
+       let time fs =
+	 Let("time", Time,
+	     compound (fs @ [printf("Took %gs\n", [Time -: Var "time"])])) in
+       compound
+	 [ time
+	     [ printf("Stack %d. Visit stack %d. Live %d. GC marking...\n", [Load(stack_depth, `Int);Load(n_visit, `Int);Load(n_allocated, `Int)]);
+	       Apply(Var "gc_mark", [Int 0]) ];
+	   time
+	     [ printf("GC sweeping...\n", []);
+	       Apply(Var "gc_sweep", [Int 0]) ];
+	   printf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
+	   Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int))]) ]
 
 (** Bound variables. *)
 let vars = ref vars
@@ -1708,6 +1651,7 @@ let save() =
 	   ignore(state#call CallConv.c llf [int 0]) in
 	 List.iter call !eval_functions;
 	 return vars state Unit `Unit) in
+  Llvm_analysis.assert_valid_module m;
   ignore(Llvm_bitwriter.write_bitcode_file m "aout.bc")
 
 let () =
