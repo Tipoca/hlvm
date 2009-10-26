@@ -6,9 +6,10 @@ HLVM currently sports the following features:
 . Unit, bool, int and float primitive types.
 . Tuples.
 . Arrays.
-. Boxed values (for algebraic datatypes).
+. Union types.
 . Function pointers.
 . Tail call elimination of all tail calls.
+. Generic printing.
 . Foreign function interface to call C directly.
 . Mark and sweep garbage collector.
 . Incremental JIT compilation to high-performance native code suitable for a REPL.
@@ -20,7 +21,7 @@ HLVM aspires to provide the following features in the future:
 . Parametric polymorphism.
 . Parallel threads.
 . Global variables.
-. Per-type generic printing, comparison, equality, hashing and serialization functions.
+. Generic comparison, equality, hashing and serialization functions.
 . A standard library.
 
 

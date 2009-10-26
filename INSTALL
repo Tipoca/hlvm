@@ -5,14 +5,14 @@ Dependencies
 ------------
 
 . libsigsegv >=2.5.
-. LLVM sources >=2.5.
+. LLVM sources >=2.6.
 . OCaml >=3.10.2.
 
 
 Installation
 ------------
 
-Configure, build and install LLVM with:
+Configure, build and install LLVM 2.6 with:
 
 $ ./configure --with-ocaml-libdir=`ocamlc -where`
 $ make -j12
@@ -40,6 +40,13 @@ in which case extensive information is printed to the console describing the pro
 The generated functions may also be visualized using LLVM by running HLVM with:
 
 $ ./hlvm --view-functions
+
+
+Run-time options
+----------------
+
+The GC may be disabled by passing the --no-gc command line option. The GC and shadow
+stack may be disabled by passing the --no-shadow-stack command line option.
 
 
 Standalone compilation and optimization

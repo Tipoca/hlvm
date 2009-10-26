@@ -597,21 +597,27 @@ let find_type name =
 (** Bind a new variable. *)
 let add_val x vars = { vals = x :: vars.vals }
 
+let shadow_stack_enabled = ref true
+
 (** Push a reference type onto the shadow stack. *)
 let push self stack depth v =
-  if !debug then
-    printf "state#push\n%!";
-  let d = self#load depth [int 0] in
-  let data = extractvalue self (self#load stack [int 0]) Ref.data in
-  let data = self#bitcast data (pointer_type(type_of v)) in
-  self#store data [d] v;
-  self#store depth [int 0] (build_add (int 1) d "" self#bb)
+  if !shadow_stack_enabled then begin
+    if !debug then
+      printf "state#push\n%!";
+    let d = self#load depth [int 0] in
+    let data = extractvalue self (self#load stack [int 0]) Ref.data in
+    let data = self#bitcast data (pointer_type(type_of v)) in
+    self#store data [d] v;
+    self#store depth [int 0] (build_add (int 1) d "" self#bb)
+  end
 
 (** Restore the shadow stack by resetting its depth to an older value. *)
 let gc_restore self =
-  if !debug then
-    printf "state#restore\n%!";
-  self#store stack_depth [int 0] self#odepth
+  if !shadow_stack_enabled then begin
+    if !debug then
+      printf "state#restore\n%!";
+    self#store stack_depth [int 0] self#odepth
+  end
 
 (** Create a state object that encapsulates our interface for emitting LLVM
     instructions. *)
@@ -1517,11 +1523,12 @@ let init() =
 	   (state#bitcast
 	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_time"])
 	      lltime_ty);
-	 let n = 1 lsl 22 in
+	 let n = 1 lsl 25 in
 	 let state, _ =
-	   compound [ Store(stack, Alloc(Int n, Null));
-		      Store(visit_stack, Alloc(Int n, Null));
-		      Store(allocated, Alloc(Int n, Null)) ] in
+	   expr vars state
+	     (compound [ Store(stack, Alloc(Int n, Null));
+			 Store(visit_stack, Alloc(Int n, Null));
+			 Store(allocated, Alloc(Int n, Null)) ]) in
 	 let state, _ =
 	   if not !debug then state, (unit, `Unit) else
 	     expr vars state (Printf("init_runtime end\n", [])) in
@@ -1531,26 +1538,11 @@ let init() =
     run_function llvm_f in
   vars
 
-let boot : t list =
+let gc_enabled = ref true
+
+let boot() : t list =
   let printf(x, y) =
     if !debug then Printf(x, y) else Unit in
-
-  let getMark f =
-    If(AddressOf f =: Int 0,
-       compound
-	 [ Printf("GetMark(null)\n", []);
-	   Printf("GetMark(", []);
-	   Print f;
-	   Printf(")\n", []);
-	   Exit(Int 1);
-	   Int 0 ],
-       GetMark f) in
-  let setMark(f, n) =
-    If(AddressOf f =: Int 0,
-       compound
-	 [ Printf("SetMark(null)\n", []);
-	   Exit(Int 1) ],
-       SetMark(f, n)) in
 
   let getMark f = GetMark f in
   let setMark(f, n) = SetMark(f, n) in
@@ -1612,26 +1604,17 @@ let boot : t list =
     (* Clear, mark and sweep. *)
     `UnsafeFunction
       ("gc", ["", `Unit], `Unit,
-       compound
-	 [ Apply(Var "gc_mark", [Int 0]);
-	   Apply(Var "gc_sweep", [Int 0]);
-	   Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int)) ])
-      
-    (* Clear, mark and sweep. *)
-    `UnsafeFunction
-      ("gc", ["", `Unit], `Unit,
        let time fs =
 	 Let("time", Time,
 	     compound (fs @ [printf("Took %gs\n", [Time -: Var "time"])])) in
-       compound
-	 [ time
-	     [ printf("Stack %d. Visit stack %d. Live %d. GC marking...\n", [Load(stack_depth, `Int);Load(n_visit, `Int);Load(n_allocated, `Int)]);
-	       Apply(Var "gc_mark", [Int 0]) ];
-	   time
-	     [ printf("GC sweeping...\n", []);
-	       Apply(Var "gc_sweep", [Int 0]) ];
-	   printf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
-	   Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int))]) ]
+       if not !gc_enabled then compound [] else
+	 compound
+	   [ printf("Stack %d. Visit stack %d. Live %d. GC marking...\n", [Load(stack_depth, `Int);Load(n_visit, `Int);Load(n_allocated, `Int)]);
+	     time [ Apply(Var "gc_mark", [Int 0]) ];
+	     printf("GC sweeping...\n", []);
+	     time [ Apply(Var "gc_sweep", [Int 0]) ];
+	     printf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
+	     Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int))]) ]
 
 (** Bound variables. *)
 let vars = ref vars
@@ -1658,5 +1641,12 @@ let () =
   Array.iter (function
 		| "--debug" -> debug := true
 		| "--view-functions" -> view := true
+		| "--no-shadow-stack" ->
+		    printf "Shadow stack and GC disabled.\n%!";
+		    shadow_stack_enabled := false;
+		    gc_enabled := false
+		| "--no-gc" ->
+		    printf "GC disabled.\n%!";
+		    gc_enabled := false
 		| _ -> ()) Sys.argv;
-  vars := List.fold_left def (init()) boot
+  vars := List.fold_left def (init()) (boot())
