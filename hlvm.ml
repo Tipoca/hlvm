@@ -287,6 +287,14 @@ module Expr = struct
     | Store _
     | Llvalue _
     | Time as e -> e
+
+  let count f =
+    let n = ref 0 in
+    let rec loop f =
+      incr n;
+      rewrite loop f in
+    ignore(loop f);
+    !n
   
   let rec unroll_rule f params body = function
     | Let(x, body, rest) as e when x=f ->
@@ -302,8 +310,12 @@ module Expr = struct
         Let(" args", Struct args, body)
     | e -> rewrite (unroll_rule f params body) e
   
+  let rec unroll f args body body' =
+    if count body' > 4000 then body' else
+      rewrite (unroll_rule f (List.map fst args) body) body'
+
   let unroll f args body =
-    rewrite (unroll_rule f (List.map fst args) body) body
+    unroll f args body (unroll f args body (unroll f args body body))
 end
 
 open Expr
@@ -570,6 +582,10 @@ let lltime_ty = pointer_type(function_type double_type [||])
 
 (** LLVM global to store the dynamically-loaded hlvm_time function. *)
 let lltime = define_global "hlvm_time" (const_null lltime_ty) m
+
+let mark_time = define_global "mark_time" (const_float double_type 0.0) m
+
+let sweep_time = define_global "sweep_time" (const_float double_type 0.0) m
 
 (** Default calling convention used by HLVM. *)
 let cc = CallConv.fast
@@ -1220,6 +1236,9 @@ and def vars = function
 
       let body = Expr.unroll f args (Expr.unroll f args body) in
 
+      if true || !debug then
+	printf "%s: %d subexpressions\n%!" f (Expr.count body);
+
       defun vars cc f args ty_ret
 	(fun vars state ->
 	   let state = state#no_gc in
@@ -1229,6 +1248,9 @@ and def vars = function
 	eprintf "def %s\n%!" f;
 
       let body = Expr.unroll f args (Expr.unroll f args body) in
+
+      if true || !debug then
+	printf "%s: %d subexpressions\n%!" f (Expr.count body);
 
       defun vars cc f args ty_ret
 	(fun vars state ->
@@ -1280,7 +1302,12 @@ and def vars = function
 	     let state, _ =
 	       if not !debug then state, (unit, `Unit) else
 		 expr vars state (Printf("# "^Expr.to_string () f^"\n", [])) in
-	     let state, (f, ty_f) = expr vars state f in
+	     let state, (f, ty_f) =
+	       expr vars state
+		 (compound
+		    [ Store(mark_time, Float 0.0);
+		      Store(sweep_time, Float 0.0);
+		      f ]) in
 	     let f =
 	       compound
 		 [ Printf("- : "^Type.to_string () ty_f^" = ", []);
@@ -1294,7 +1321,11 @@ and def vars = function
 	     let state, _ = expr vars state (Apply(Var "gc", [Unit])) in
 	     let t2 = Llvalue(state#time, `Float) in
 	     let state, _ =
-	       expr vars state (Printf("Took %fs\n", [t2 -: t1])) in
+	       expr vars state
+		 (Printf("%gs total; %gs mark; %gs sweep\n",
+			 [ t2 -: t1;
+			   Load(mark_time, `Float);
+			   Load(sweep_time, `Float) ])) in
 	     let _ =
 	       state#call CallConv.c stackoverflow_deinstall_handler [] in
 	     return vars state Unit `Unit) in
@@ -1363,13 +1394,13 @@ and visit vars v = function
 (** Define a function that visits every value of a reference type in an
     array. *)
 and def_visit_array vars ty =
-  let f = "visit_array_"^Type.to_string () ty in
+  let f = sprintf "visit_array<%s>" (Type.to_string () ty) in
   let body, vars = visit vars (Get(Var "a", Var "i")) ty in
   if body = Unit then
     mk_fun vars cc f [ "a", `Reference ] `Unit Unit
   else
     let llvisitaux =
-      let f = f^"aux" in
+      let f = sprintf "visit_array_aux<%s>" (Type.to_string () ty) in
       mk_fun vars cc f [ "a", `Array ty;
 			 "i", `Int ] `Unit
 	(If(Var "i" =: Length(Var "a"), Unit,
@@ -1382,7 +1413,7 @@ and def_visit_array vars ty =
 
 (** Define a function to print a boxed value. *)
 and def_print vars name c ty =
-  let f = "print_" ^ name in
+  let f = sprintf "print<%s>" name in
   mk_fun vars cc f ["x", `Reference] `Unit
     (compound
        [Printf(c, []);
@@ -1424,7 +1455,7 @@ and mk_type vars ty =
 (** Create and memoize an array type. *)
 and mk_array_type ty =
   if !debug then
-    printf "mk_array_type %s\n%!" (Type.to_string () ty);
+    printf "mk_array_type<%s>\n%!" (Type.to_string () ty);
   let name = Type.to_string () (`Array ty) in
   try fst(Hashtbl.find types name) with Not_found ->
     let llty = define_global name (undef RTType.lltype) m in
@@ -1439,7 +1470,7 @@ and init_type name llty llvisit llprint =
   if !debug then
     printf "init_type %s\n%!" name;
 
-  let f = "init_type_"^name in
+  let f = sprintf "init_type<%s>" name in
   let vars =
     defun vars CallConv.c f ["", `Int] `Unit
       (fun vars state ->
@@ -1590,31 +1621,36 @@ let boot() : t list =
 	   If(Var "i" >=: Var "n", Unit,
 	      Let("a", Load(allocated, `Array `Reference),
 		  Let("p", Get(Var "a", Var "i"),
-		      If(getMark(Var "p") =: Int 1,
-			 compound
-			   [ setMark(Var "p", 0);
-			     Apply(Var "gc_sweep", [Var "i" +: Int 1]) ],
-			 compound
-			   [ Free(Var "p");
-			     Set(Var "a", Var "i",
-				 Get(Var "a", Var "n" -: Int 1));
-			     Store(n_allocated, Var "n" -: Int 1);
-			     Apply(Var "gc_sweep", [Var "i"]) ]))))));
+		      Let("i",
+			  If(getMark(Var "p") =: Int 1,
+			     compound
+			       [ setMark(Var "p", 0);
+				 Var "i" +: Int 1 ],
+			     compound
+			       [ Free(Var "p");
+				 Set(Var "a", Var "i",
+				     Get(Var "a", Var "n" -: Int 1));
+				 Store(n_allocated, Var "n" -: Int 1);
+				 Var "i" ]),
+			  Apply(Var "gc_sweep", [Var "i"])))))));
     
     (* Clear, mark and sweep. *)
     `UnsafeFunction
       ("gc", ["", `Unit], `Unit,
-       let time fs =
+       let time t fs =
 	 Let("time", Time,
-	     compound (fs @ [printf("Took %gs\n", [Time -: Var "time"])])) in
+	     compound
+	       (fs @
+		  [ printf("Took %gs\n", [Time -: Var "time"]);
+		    Store(t, Load(t, `Float) +: Time -: Var "time") ])) in
        if not !gc_enabled then compound [] else
 	 compound
 	   [ printf("Stack %d. Visit stack %d. Live %d. GC marking...\n", [Load(stack_depth, `Int);Load(n_visit, `Int);Load(n_allocated, `Int)]);
-	     time [ Apply(Var "gc_mark", [Int 0]) ];
+	     time mark_time [ Apply(Var "gc_mark", [Int 0]) ];
 	     printf("GC sweeping...\n", []);
-	     time [ Apply(Var "gc_sweep", [Int 0]) ];
+	     time sweep_time [ Apply(Var "gc_sweep", [Int 0]) ];
 	     printf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
-	     Store(quota, Int 8192 +: Int 2 *: Load(n_allocated, `Int))]) ]
+	     Store(quota, Int 256 +: Int 4 *: Load(n_allocated, `Int))]) ]
 
 (** Bound variables. *)
 let vars = ref vars

@@ -1,3 +1,12 @@
+Thu Nov 12 18:08:41 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* Time spent in mark and sweep phases is accumulated per expression
+	evaluated.
+	* Benchmarks are now warmed up to remove JIT time.
+	* New bubblesort benchmark.
+	* More fine-grained and intelligent loop unrolling.
+
+
 Sun Oct 25 22:40:03 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Updated to work with LLVM 2.6: now uses llcontext and initializes

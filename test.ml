@@ -4,27 +4,38 @@ open Hlvm
 open Expr
 
 (** Integer Fibonacci benchmark *)
-let fib : Hlvm.t list =
+let fib ns : Hlvm.t list =
   let n = Var "n" in
-  [`Function
-     ("fib", ["n", `Int], `Int,
-      If(n >: Int 1,
-	 Apply(Var "fib", [n -: Int 2]) +: Apply(Var "fib", [n -: Int 1]),
-	 n));
-
-   `Expr(Apply(Var "fib", [Int 40]))]
+  [ `Function
+      ("fib", ["n", `Int], `Int,
+       If(n >: Int 1,
+          Apply(Var "fib", [n -: Int 2]) +: Apply(Var "fib", [n -: Int 1]),
+          n)) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+            [ Printf("\nInteger Fibonacci function: fib(%d)\n", [Int n]);
+              Apply(Var "fib", [Int n]) ]))
+    ns
 
 (** Float-based Fibonacci benchmark *)
-let ffib : Hlvm.t list =
+let ffib ns : Hlvm.t list =
   let n = Var "n" in
-  [`Function
-     ("fib", ["n", `Float], `Float,
-      If(n >: Float 1.0,
-	 Apply(Var "fib", [n -: Float 2.0]) +:
-	   Apply(Var "fib", [n -: Float 1.0]),
-	 n));
-
-   `Expr(Apply(Var "fib", [Float 40.]))]
+  [ `Function
+      ("ffib", ["n", `Float], `Float,
+       If(n >: Float 1.0,
+	  Apply(Var "ffib", [n -: Float 2.0]) +:
+	    Apply(Var "ffib", [n -: Float 1.0]),
+	  n)) ] @
+    List.map
+    (fun n ->
+       let n = Float n in
+       `Expr
+	 (compound
+            [ Printf("\nFloating-point Fibonacci function: fib(%f)\n", [n]);
+              Apply(Var "ffib", [n]) ]))
+    ns
 
 let fill ty =
   [`Function
@@ -38,207 +49,180 @@ let fill ty =
 	 Unit))]
 
 (** Sieve of Eratosthenes. *)
-let sieve i : Hlvm.t list =
+let sieve is : Hlvm.t list =
   fill `Bool @
-    [`Function
-       ("last", ["a", `Array `Bool; "i", `Int], `Int,
-	If(Get(Var "a", Var "i"), Var "i",
-	   Apply(Var "last", [Var "a"; Var "i" -: Int 1])));
-     
-     `Function
-       ("loop2", ["a", `Array `Bool; "i", `Int; "di", `Int], `Unit,
-	If(Var "i" >=: Length(Var "a"), Unit,
-	   compound
-	     [ Set(Var "a", Var "i", Bool false);
-	       Apply(Var "loop2",
-		     [Var "a"; Var "i" +: Var "di"; Var "di"]) ]));
+    [ `Function
+	("last", ["a", `Array `Bool; "i", `Int], `Int,
+	 If(Get(Var "a", Var "i"), Var "i",
+	    Apply(Var "last", [Var "a"; Var "i" -: Int 1])));
+      
+      `Function
+	("loop2", ["a", `Array `Bool; "i", `Int; "di", `Int], `Unit,
+	 If(Var "i" >=: Length(Var "a"), Unit,
+	    compound
+	      [ Set(Var "a", Var "i", Bool false);
+		Apply(Var "loop2",
+		      [Var "a"; Var "i" +: Var "di"; Var "di"]) ]));
 
-     `Function
-       ("loop1", ["a", `Array `Bool; "i", `Int], `Unit,
-	If(Var "i" =: Length(Var "a"), Unit,
-	   compound
-	     [ If(Get(Var "a", Var "i"),
-		  Apply(Var "loop2", [Var "a"; Int 2 *: Var "i"; Var "i"]),
-		  Unit);
-	       Apply(Var "loop1", [Var "a"; Var "i" +: Int 1]) ]));
-     
-     `Expr(Let("a", Alloc(Int i, Bool false),
-	       compound
-		 [ Apply(Var "fill", [Var "a"; Bool true; Int 0]);
-		   Apply(Var "loop1", [Var "a"; Int 2]);
-		   Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ]))]
+      `Function
+	("loop1", ["a", `Array `Bool; "i", `Int], `Unit,
+	 If(Var "i" =: Length(Var "a"), Unit,
+	    compound
+	      [ If(Get(Var "a", Var "i"),
+		   Apply(Var "loop2", [Var "a"; Int 2 *: Var "i"; Var "i"]),
+		   Unit);
+		Apply(Var "loop1", [Var "a"; Var "i" +: Int 1]) ])) ] @
+    List.map
+    (fun i ->
+       `Expr(Let("a", Alloc(Int i, Bool false),
+		 compound
+		   [ Printf("\nSieve of Eratosthenes\n", []);
+                     Apply(Var "fill", [Var "a"; Bool true; Int 0]);
+		     Apply(Var "loop1", [Var "a"; Int 2]);
+		     Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ])))
+    is
 
-let mandelbrot n : Hlvm.t list =
-  [`Function
-     ("pixel", ["n", `Int;
-		"zr", `Float; "zi", `Float;
-		"cr", `Float; "ci", `Float], `Unit,
-      If(Var "n" =: Int 65536, Printf(" ", []),
-	 If(Var "zr" *: Var "zr" +: Var "zi" *: Var "zi" >=: Float 4.0,
-	    Printf(".", []),
-	    Apply(Var "pixel",
-		  [Var "n" +: Int 1;
-		   Var "zr" *: Var "zr" -:
-		     Var "zi" *: Var "zi" +: Var "cr";
-		   Float 2.0 *: Var "zr" *: Var "zi" +: Var "ci";
-		   Var "cr"; Var "ci"]))));
-   
-   `Function
-     ("row", ["i", `Int; "j", `Int; "n", `Int], `Unit,
-      If(Var "i" >: Var "n", Unit,
-	 compound
-	   [ Apply(Var "pixel",
-		   [Int 0;
-		    Float 0.0; Float 0.0;
-		    Float 2.0 *: FloatOfInt(Var "i") /: FloatOfInt(Var "n") -:
-		      Float 1.5;
-		    Float 2.0 *: FloatOfInt(Var "j") /: FloatOfInt(Var "n") -:
-		      Float 1.0]);
-	     Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
+let mandelbrot ns : Hlvm.t list =
+  [ `Function
+      ("pixel", ["n", `Int;
+		 "zr", `Float; "zi", `Float;
+		 "cr", `Float; "ci", `Float], `Unit,
+       If(Var "n" =: Int 65536, Printf(" ", []),
+	  If(Var "zr" *: Var "zr" +: Var "zi" *: Var "zi" >=: Float 4.0,
+	     Printf(".", []),
+	     Apply(Var "pixel",
+		   [Var "n" +: Int 1;
+		    Var "zr" *: Var "zr" -:
+		      Var "zi" *: Var "zi" +: Var "cr";
+		    Float 2.0 *: Var "zr" *: Var "zi" +: Var "ci";
+		    Var "cr"; Var "ci"]))));
+    
+    `Function
+      ("row", ["i", `Int; "j", `Int; "n", `Int], `Unit,
+       If(Var "i" >: Var "n", Unit,
+	  compound
+	    [ Apply(Var "pixel",
+		    [Int 0;
+		     Float 0.0; Float 0.0;
+		     Float 2.0 *: FloatOfInt(Var "i") /: FloatOfInt(Var "n") -:
+		       Float 1.5;
+		     Float 2.0 *: FloatOfInt(Var "j") /: FloatOfInt(Var "n") -:
+		       Float 1.0]);
+	      Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
 
-   `Function
-     ("col", ["j", `Int; "n", `Int], `Unit,
-      If(Var "j" >: Var "n", Unit,
-	 compound
-	   [ Apply(Var "row", [Int 0; Var "j"; Var "n"]);
-	     Printf("\n", []);
-	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
+    `Function
+      ("col", ["j", `Int; "n", `Int], `Unit,
+       If(Var "j" >: Var "n", Unit,
+	  compound
+	    [ Apply(Var "row", [Int 0; Var "j"; Var "n"]);
+	      Printf("\n", []);
+	      Apply(Var "col", [Var "j" +: Int 1; Var "n"])])) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+            [ Printf("\nMandelbrot with inline complex arithmetic\n", []);
+              Apply(Var "col", [Int 0; Int n]) ]))
+    ns
 
-   `Expr(Apply(Var "col", [Int 0; Int n]))]
-
-let mandelbrot2 n : Hlvm.t list =
+let mandelbrot2 ns : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
   let re z = GetValue(Var z, 0) in
   let im z = GetValue(Var z, 1) in
-  [`Function("znorm2", ["z", complex], `Float,
-             re "z" *: re "z" +: im "z" *: im "z");
+  [ `Function("znorm2", ["z", complex], `Float,
+              re "z" *: re "z" +: im "z" *: im "z");
 
-   `Function("zsqr", ["z", complex], complex,
-             Struct[re "z" *: re "z" -: im "z" *: im "z";
-                    Float 2.0 *: re "z" *: im "z"]);
+    `Function("zsqr", ["z", complex], complex,
+              Struct[re "z" *: re "z" -: im "z" *: im "z";
+                     Float 2.0 *: re "z" *: im "z"]);
 
-   `Function("zadd", ["z1", complex; "z2", complex], complex,
-             Struct[re "z1" +: re "z2"; im "z1" +: im "z2"]);
+    `Function("zadd", ["z1", complex; "z2", complex], complex,
+              Struct[re "z1" +: re "z2"; im "z1" +: im "z2"]);
 
-   `Function
-     ("pixel", ["n", `Int; "z", complex; "c", complex], `Unit,
-      If(Var "n" =: Int 65536, Printf(" ", []),
-         If(Apply(Var "znorm2", [Var "z"]) >=: Float 4.0,
-            Printf(".", []),
-	    Apply(Var "pixel",
-                  [Var "n" +: Int 1;
-                   Apply(Var "zadd", [Apply(Var "zsqr", [Var "z"]); Var "c"]);
-                   Var "c"]))));
+    `Function
+      ("pixel", ["n", `Int; "z", complex; "c", complex], `Unit,
+       If(Var "n" =: Int 65536, Printf(" ", []),
+          If(Apply(Var "znorm2", [Var "z"]) >=: Float 4.0,
+             Printf(".", []),
+	     Apply(Var "pixel",
+                   [Var "n" +: Int 1;
+                    Apply(Var "zadd", [Apply(Var "zsqr", [Var "z"]); Var "c"]);
+                    Var "c"]))));
 
-   `Function
-     ("row", ["i", `Int; "j", `Int; "n", `Int], `Unit,
-      If(Var "i" >: Var "n", Unit,
-         compound
-           [ Apply(Var "pixel",
-                   [Int 0;
-                    Struct[Float 0.0; Float 0.0];
-                    Struct[Float 2.0 *: FloatOfInt(Var "i") /:
-                             FloatOfInt(Var "n") -: Float 1.5;
-                           Float 2.0 *: FloatOfInt(Var "j") /:
-                             FloatOfInt(Var "n") -: Float 1.0]]);
-             Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
+    `Function
+      ("row", ["i", `Int; "j", `Int; "n", `Int], `Unit,
+       If(Var "i" >: Var "n", Unit,
+          compound
+            [ Apply(Var "pixel",
+                    [Int 0;
+                     Struct[Float 0.0; Float 0.0];
+                     Struct[Float 2.0 *: FloatOfInt(Var "i") /:
+                              FloatOfInt(Var "n") -: Float 1.5;
+                            Float 2.0 *: FloatOfInt(Var "j") /:
+                              FloatOfInt(Var "n") -: Float 1.0]]);
+              Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
 
-   `Function
-     ("col", ["j", `Int; "n", `Int], `Unit,
-      If(Var "j" >: Var "n", Unit,
-	 compound
-	   [ Apply(Var "row", [Int 0; Var "j"; Var "n"]);
-	     Printf("\n", []);
-	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
-
-   `Expr(Apply(Var "col", [Int 0; Int n]))]
-
-let mandelbrot3 n : Hlvm.t list =
-  let complex = `Struct[`Float; `Float] in
-  let re z = GetValue(Var z, 0) in
-  let im z = GetValue(Var z, 1) in
-  [`Function("znorm2", ["z", complex], `Float,
-             re "z" *: re "z" +: im "z" *: im "z");
-
-   `Function("zsqr", ["z", complex], complex,
-             Struct[re "z" *: re "z" -: im "z" *: im "z";
-                    Float 2.0 *: re "z" *: im "z"]);
-
-   `Function("zadd", ["z1", complex; "z2", complex], complex,
-             Struct[re "z1" +: re "z2"; im "z1" +: im "z2"]);
-
-   `Function
-     ("pixel", ["nzc", `Struct[`Int; complex; complex]], `Unit,
-      Let("n", GetValue(Var "nzc", 0),
-	  Let("z", GetValue(Var "nzc", 1),
-	      Let("c", GetValue(Var "nzc", 2),
-      If(Var "n" =: Int 65536, Printf(" ", []),
-         If(Apply(Var "znorm2", [Var "z"]) >=: Float 4.0,
-            Printf(".", []),
-	    Apply(Var "pixel",
-		  [Struct
-                     [Var "n" +: Int 1;
-                      Apply(Var "zadd", [Apply(Var "zsqr", [Var "z"]); Var "c"]);
-                      Var "c"]])))))));
-
-   `Function
-     ("row", ["i", `Int; "j", `Int; "n", `Int], `Unit,
-      If(Var "i" >: Var "n", Unit,
-         compound
-           [ Apply(Var "pixel",
-		   [Struct
-                      [Int 0;
-                       Struct[Float 0.0; Float 0.0];
-                       Struct[Float 2.0 *: FloatOfInt(Var "i") /:
-				FloatOfInt(Var "n") -: Float 1.5;
-                              Float 2.0 *: FloatOfInt(Var "j") /:
-				FloatOfInt(Var "n") -: Float 1.0]]]);
-             Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
-
-   `Function
-     ("col", ["j", `Int; "n", `Int], `Unit,
-      If(Var "j" >: Var "n", Unit,
-	 compound
-	   [ Apply(Var "row", [Int 0; Var "j"; Var "n"]);
-	     Printf("\n", []);
-	     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]));
-
-   `Expr(Apply(Var "col", [Int 0; Int n]))]
+    `Function
+      ("col", ["j", `Int; "n", `Int], `Unit,
+       If(Var "j" >: Var "n", Unit,
+	  compound
+	    [ Apply(Var "row", [Int 0; Var "j"; Var "n"]);
+	      Printf("\n", []);
+	      Apply(Var "col", [Var "j" +: Int 1; Var "n"])])) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+            [ Printf("\nMandelbrot with complex arithmetic functions\n", []);
+              Apply(Var "col", [Int 0; Int n]) ]))
+    ns
 
 let tco n : Hlvm.t list =
-  [`Function("even", ["odd", `Function([`Int], `Int); "n", `Int], `Int,
-             Apply(Var "odd", [Var "n" +: Int 1]));
+  [ `Function("even", ["odd", `Function([`Int], `Int); "n", `Int], `Int,
+              Apply(Var "odd", [Var "n" +: Int 1]));
 
-   `Function("odd", ["n", `Int], `Int,
-	     If(Var "n" <: Int n,
-		Apply(Var "even", [Var "odd"; Var "n" +: Int 1]),
-		Var "n"));
+    `Function("odd", ["n", `Int], `Int,
+	      If(Var "n" <: Int n,
+		 Apply(Var "even", [Var "odd"; Var "n" +: Int 1]),
+		 Var "n"));
 
-   `Expr(Apply(Var "even", [Var "odd"; Int 0]))]
+    `Expr
+      (compound
+         [ Printf("\nTesting tail call elimination across a higher-order function\n", []);
+           Apply(Var "even", [Var "odd"; Int 0]) ])]
 
 let tuples : Hlvm.t list =
-  [`Function("id", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
-	     Var "s");
+  [ `Function("id", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
+	      Var "s");
 
-   `Function("id2", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
-	     Apply(Var "id", [Var "s"]));
+    `Function("id2", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
+	      Apply(Var "id", [Var "s"]));
 
-   `Function("rev", ["s", `Struct[`Int; `Float]], `Struct[`Float; `Int],
-	     Apply(Var "id", [Struct[GetValue(Var "s", 1);
-				     GetValue(Var "s", 0)]]));
+    `Function("rev", ["s", `Struct[`Int; `Float]], `Struct[`Float; `Int],
+	      Apply(Var "id", [Struct[GetValue(Var "s", 1);
+				      GetValue(Var "s", 0)]]));
 
-   `Expr(Apply(Var "rev", [Struct[Int 2; Float 3.4]]))]
+    `Expr
+      (compound
+         [ Printf("\nTesting structs (should give (3.4, 2))\n", []);
+           Apply(Var "rev", [Struct[Int 2; Float 3.4]]) ]) ]
 
 let trig : Hlvm.t list =
   let triple = `Struct[`Float; `Float; `Float] in
-  [`Extern("sin", [`Float], `Float);
-   `Extern("cos", [`Float], `Float);
-   `Function("test", ["f", `Function([`Float], `Float)], triple,
-	     Struct[Apply(Var "f", [Float 0.1]);
-		    Apply(Var "f", [Float 0.2]);
-		    Apply(Var "f", [Float 0.3])]);
-   `Expr(compound[Print(Apply(Var "test", [Var "sin"]));
-		  Print(Apply(Var "test", [Var "cos"]))])]
+  [ `Extern("sin", [`Float], `Float);
+
+    `Extern("cos", [`Float], `Float);
+
+    `Function("test", ["f", `Function([`Float], `Float)], triple,
+	      Struct[Apply(Var "f", [Float 0.1]);
+		     Apply(Var "f", [Float 0.2]);
+		     Apply(Var "f", [Float 0.3])]);
+
+    `Expr
+      (compound
+         [ Printf("\nTesting FFI\n", []);
+           Print(Apply(Var "test", [Var "sin"]));
+	   Print(Apply(Var "test", [Var "cos"])) ]) ]
 
 (*
   OCaml: 4.53s recursive
@@ -247,56 +231,42 @@ let trig : Hlvm.t list =
   HLVM:  2.42s substitute "f"
   HLVM:  2.29s fully inlined and reduced fold
 *)
-let fold n : Hlvm.t list =
+let fold ns : Hlvm.t list =
   let fold ty1 ty2 =
-    [`Function("fold_aux", ["n", `Int;
-			    "f", `Function([ty1; ty2], ty1);
-			    "y", ty1;
-			    "xs", `Array ty2], ty1,
-	       If(Var "n" <: Length(Var "xs"),
-		  Apply(Var "fold_aux",
-			[Var "n" +: Int 1;
-			 Var "f";
-			 Apply(Var "f", [Var "y"; Get(Var "xs", Var "n")]);
-			 Var "xs"]),
-		  Var "y"));
-     `Function("fold", ["f", `Function([ty1; ty2], ty1);
-			"y", ty1;
-			"xs", `Array ty2], ty1,
-	       Apply(Var "fold_aux", [Int 0; Var "f"; Var "y"; Var "xs"]))] in
+    [ `Function("fold_aux", ["n", `Int;
+			     "f", `Function([ty1; ty2], ty1);
+			     "y", ty1;
+			     "xs", `Array ty2], ty1,
+		If(Var "n" <: Length(Var "xs"),
+		   Apply(Var "fold_aux",
+			 [Var "n" +: Int 1;
+			  Var "f";
+			  Apply(Var "f", [Var "y"; Get(Var "xs", Var "n")]);
+			  Var "xs"]),
+		   Var "y"));
+
+      `Function("fold", ["f", `Function([ty1; ty2], ty1);
+			 "y", ty1;
+			 "xs", `Array ty2], ty1,
+		Apply(Var "fold_aux", [Int 0; Var "f"; Var "y"; Var "xs"])) ]
+  in
 
   fold (`Struct[`Float; `Float]) `Float @
     fill `Float @
-    [`Function("f", ["x", `Struct[`Float; `Float];
-		     "y", `Float], `Struct[`Float; `Float],
-	       Struct[GetValue(Var "x", 0) +:
-			Var "y" /: (Float 1.0 +: GetValue(Var "x", 1));
-		      GetValue(Var "x", 1) +: Float 1.]);
-     `Expr(Let("xs", Alloc(Int n, Float 1.0),
-	       compound
-		 [ Apply(Var "fold",
-			 [Var "f"; Struct[Float 0.; Float 0.]; Var "xs"])]))]
-
-let fold n : Hlvm.t list =
-  fill `Float @
-    [`Function("fold_aux", ["n", `Int;
-			    "y", `Struct[`Float; `Float];
-			    "xs", `Array `Float], `Struct[`Float; `Float],
-	       If(Var "n" <: Length(Var "xs"),
-		  Let("i", GetValue(Var "y", 1),
-		      Apply(Var "fold_aux",
-			    [Var "n" +: Int 1;
-			     Struct[GetValue(Var "y", 0) +:
-				      Get(Var "xs", Var "n") /:
-				      (Float 1.0 +: Var "i");
-				    Var "i" +: Float 1.];
-			     Var "xs"])),
-		  Var "y"));
-
-     `Expr(Let("xs", Alloc(Int n, Float 1.0),
-	       compound
-		 [ Apply(Var "fold_aux",
-			 [Int 0; Struct[Float 0.; Float 0.]; Var "xs"])]))]
+    [ `Function("f", ["x", `Struct[`Float; `Float];
+		      "y", `Float], `Struct[`Float; `Float],
+		Struct[GetValue(Var "x", 0) +:
+			 Var "y" /: (Float 1.0 +: GetValue(Var "x", 1));
+		       GetValue(Var "x", 1) +: Float 1.]) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (Let("xs", Alloc(Int n, Float 1.0),
+	      compound
+		[ Printf("\nArray.fold over %d elements with tuple accumulator\n", [Int n]);
+		  Apply(Var "fold",
+			[Var "f"; Struct[Float 0.; Float 0.]; Var "xs"]) ])))
+    ns
 
 (** Type of a list. *)
 let ty_list ty =
@@ -306,6 +276,7 @@ let ty_list ty =
 let nil = Construct("Nil", Unit)
 let cons h t = Construct("Cons", Struct[h; t])
 
+(* Pattern match over empty or non-empty list. *)
 let cond_list list h t k_nil k_cons =
   If(IsType(Var list, "Nil"), k_nil,
      Let(h^t, Cast(Var list, "Cons"),
@@ -324,7 +295,7 @@ let list_fold_left a b =
 		      Apply(Var "f", [Var "x"; Var "h"]);
 		      Var "t"])))
 
-let list n : Hlvm.t list =
+let list ns : Hlvm.t list =
   ty_list `Int @
     [ `Function("add", ["n", `Int; "m", `Int], `Int, Var "n" +: Var "m");
       
@@ -335,11 +306,16 @@ let list n : Hlvm.t list =
       
       list_fold_left `Int `Int;
       
-      `Expr(Let("list", Apply(Var "init", [nil; Int n]),
-		Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])));
-      
-      `Expr(Apply(Var "init", [nil; Int 10]))]
-
+      `Expr(Apply(Var "init", [nil; Int 10])) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+	    [ Printf("\nList.init and fold over %d elements\n", [Int n]);
+	      Let("list", Apply(Var "init", [nil; Int n]),
+		  Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])) ]))
+    ns
+       
 (** Type of a closure. *)
 let ty_closure(ty1, ty2) =
   `Struct[`Function([`Reference; ty1], ty2); `Reference]
@@ -350,21 +326,24 @@ let apply(f, x) =
 
 let curry : Hlvm.t list =
   let ty_ret = `Struct[`Int; `Float] in
-  [`Function("f_uncurried", ["x", `Int; "y", `Float], ty_ret,
-	     Struct[Var "x"; Var "y"]);
+  [ `Function("f_uncurried", ["x", `Int; "y", `Float], ty_ret,
+	      Struct[Var "x"; Var "y"]);
 
-   `Type("Int", `Int);
+    `Type("Int", `Int);
 
-   `Function("f_apply_2", ["env", `Reference; "y", `Float], ty_ret,
-	     Apply(Var "f_uncurried", [Cast(Var "env", "Int"); Var "y"]));
+    `Function("f_apply_2", ["env", `Reference; "y", `Float], ty_ret,
+	      Apply(Var "f_uncurried", [Cast(Var "env", "Int"); Var "y"]));
 
-   `Function("f_apply_1", ["x", `Int], ty_closure(`Float, ty_ret),
-	     Struct[Var "f_apply_2"; Construct("Int", Var "x")]);
+    `Function("f_apply_1", ["x", `Int], ty_closure(`Float, ty_ret),
+	      Struct[Var "f_apply_2"; Construct("Int", Var "x")]);
 
-   `Expr(Let("g", Apply(Var "f_apply_1", [Int 3]),
-	     Struct[apply(Var "g", Float 2.3);
-		    apply(Var "g", Float 3.4)]))]
-
+    `Expr
+      (compound
+	 [ Printf("\nTest partial application of curried functions\n", []);
+	   Let("g", Apply(Var "f_apply_1", [Int 3]),
+	       Struct[apply(Var "g", Float 2.3);
+		      apply(Var "g", Float 3.4)]) ]) ]
+     
 let list_filter ty : Hlvm.t =
   `Function("filter", ["pred", ty_closure(ty, `Bool);
 		       "list", `Reference], `Reference,
@@ -381,15 +360,15 @@ let list_length ty : Hlvm.t =
 	      (Int 0)
 	      (Int 1 +: Apply(Var "length", [Var "t"])))
 
-let queens n =
+let queens ns =
   let x1 = Var "x1" and x2 = Var "x2" and y1 = Var "y1" and y2 = Var "y2" in
   let ty_pos = `Struct[`Int; `Int] in
   let rec init n f = if n=0 then [] else f(n-1) :: init (n-1) f in
-  let ps = List.flatten (init n (fun i -> init n (fun j -> i, j))) in
+  let ps n = List.flatten (init n (fun i -> init n (fun j -> i, j))) in
   let rec expr_of_list = function
     | [] -> nil
     | (i, j)::t -> cons (Struct[Int i; Int j]) (expr_of_list t) in
-  let ps = expr_of_list ps in
+  let ps n = expr_of_list(ps n) in
   ty_list ty_pos @
     [ list_filter ty_pos;
 
@@ -437,11 +416,16 @@ let queens n =
 				 Var "ps";
 				 Var "accu"])])));
 
-      `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1);
+      `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1)] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+	    [ Printf("\nSolve %d-queens problem using lists\n", [Int n]);
+	      Apply(Var "search", [Var "f"; Int n; nil; ps n; Int 0]) ]))
+    ns
 
-      `Expr(Apply(Var "search", [Var "f"; Int n; nil; ps; Int 0]))]
-
-let gc =
+let gc ns =
   let append ty =
     [ `Function("aux", ["a", `Array ty;
 			"b", `Array ty;
@@ -462,7 +446,6 @@ let gc =
 				  Int 0;
 				  Var "x"])) ] in
   let q = 16381 in
-  let n = 1000000 in
   let ty_bkt = `Array(`Struct[`Reference; `Bool]) in
   append (`Struct[`Reference; `Bool]) @
     fill(`Struct[`Int; ty_bkt]) @
@@ -586,22 +569,68 @@ let gc =
 					    Get(Var "b", Var "i") ]);
 		       Apply(Var "loop2", [ Var "a";
 					    Var "b";
-					    Var "i" +: Int 1 ]) ]));
+					    Var "i" +: Int 1 ]) ])) ] @
+    List.map
+    (fun n ->
+       `Expr(Let("a", Alloc(Int q, Struct[Int 0; null_of ty_bkt]),
+		 Let("b", Alloc(Int n, Null),
+		     compound
+		       [ Printf("\nHash table benchmark: n=%d\n", [Int n]);
+			 Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
+			 Apply(Var "loop1", [ Var "a";
+					      Var "b";
+					      Int 0 ]);
+			 Apply(Var "add", [Var "a"; Construct("Int", Int(-2))]);
+			 Apply(Var "clear", [ Var "a"; Int 0 ]);
+			 Apply(Var "loop2", [ Var "a";
+					      Var "b";
+					      Int 0 ]);
+			 Apply(Var "sweep", [ Var "a"; Int 0 ]);
+		       ]))))
+    ns
 
-      `Expr(Let("a", Alloc(Int q, Struct[Int 0; null_of ty_bkt]),
-		Let("b", Alloc(Int n, Null),
-		    compound
-		      [ Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
-			Apply(Var "loop1", [ Var "a";
-					     Var "b";
-					     Int 0 ]);
-			Apply(Var "add", [Var "a"; Construct("Int", Int(-2))]);
-			Apply(Var "clear", [ Var "a"; Int 0 ]);
-			Apply(Var "loop2", [ Var "a";
-					     Var "b";
-					     Int 0 ]);
-			Apply(Var "sweep", [ Var "a"; Int 0 ]);
-		      ]))) ]
+let bubble_sort ns =
+  let ty = `Float in
+  [ `Function
+      ("bubble_sort_loop2", ["a", `Array ty; "i", `Int; "j", `Int], `Unit,
+       If(Var "j" >: Var "i", Unit,
+          Let("aj0", Get(Var "a", Var "j"),
+              Let("aj1", Get(Var "a", Var "j" +: Int 1),
+                  compound
+                    [ If(Var "aj0" >=: Var "aj1", Unit,
+                        compound
+                          [ Set(Var "a", Var "j", Var "aj1");
+                            Set(Var "a", Var "j" +: Int 1, Var "aj0") ]);
+                      Apply(Var "bubble_sort_loop2",
+                            [Var "a"; Var "i"; Var "j" +: Int 1]) ]))));
+
+    `Function
+      ("bubble_sort_loop1", ["a", `Array ty; "i", `Int], `Unit,
+       If(Var "i" <: Int 0, Unit,
+          compound
+            [ Apply(Var "bubble_sort_loop2", [Var "a"; Var "i"; Int 0]);
+              Apply(Var "bubble_sort_loop1", [Var "a"; Var "i" -: Int 1]) ]));
+
+    `Function
+      ("bubble_sort", ["a", `Array ty], `Unit,
+       Apply(Var "bubble_sort_loop1", [Var "a"; Length(Var "a") -: Int 2]));
+
+    `Extern("sin", [`Float], `Float);
+
+    `Function
+      ("init", ["a", `Array ty; "i", `Int], `Array ty,
+       If(Var "i" =: Length(Var "a"), Var "a",
+          compound
+            [ Set(Var "a", Var "i", Apply(Var "sin", [Float 3.0 *: (FloatOfInt(Var "i") /: FloatOfInt(Length(Var "a")))]));
+              Apply(Var "init", [Var "a"; Var "i" +: Int 1]) ])) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+	    [ Printf("\nBubble sort benchmark: n=%d\n", [Int n]);
+	      Let("a", Apply(Var "init", [Alloc(Int 10000, Float 0.0); Int 0]),
+		  Apply(Var "bubble_sort", [Var "a"])) ]))
+    ns
 
 (** Insert debug information at the beginning of each function. *)
 let rec trace : Hlvm.t list -> Hlvm.t list = function
@@ -619,26 +648,25 @@ let rec trace : Hlvm.t list -> Hlvm.t list = function
 (** Main program. *)
 let () =
   let defs =
-    [`Expr(Int 3)] @
-      fib @
-      ffib @
-      sieve 100000000 @
-      mandelbrot 77 @
-      mandelbrot2 77 @
-      mandelbrot3 77 @
+(*
       tco 1000000 @
       tuples @
       trig @
-      fold 100000000 @
-      list 3000000 @
       curry @
-      queens 8 @
-      queens 9 @
-      queens 10 @
-      gc @
-      [] in
-(*
-  let defs = trace defs in
+      fib [10; 40] @
+      ffib [10.0; 40.0] @
+      sieve [1000; 100000000] @
+      mandelbrot [1; 77] @
+      mandelbrot2 [1; 77] @
+      fold [1000; 100000000] @
 *)
+      list [1000; 3000000] @
+      queens [8;9;10] @
+      gc [1000; 1000000] @
+      bubble_sort [100; 100000] @
+      [] in
+  (*
+    let defs = trace defs in
+  *)
   List.iter Hlvm.eval defs;
   Hlvm.save()
