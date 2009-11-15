@@ -648,7 +648,6 @@ let rec trace : Hlvm.t list -> Hlvm.t list = function
 (** Main program. *)
 let () =
   let defs =
-(*
       tco 1000000 @
       tuples @
       trig @
@@ -659,14 +658,13 @@ let () =
       mandelbrot [1; 77] @
       mandelbrot2 [1; 77] @
       fold [1000; 100000000] @
-*)
       list [1000; 3000000] @
       queens [8;9;10] @
       gc [1000; 1000000] @
       bubble_sort [100; 100000] @
       [] in
-  (*
-    let defs = trace defs in
-  *)
+(*
+  let defs = trace defs in
+*)
   List.iter Hlvm.eval defs;
   Hlvm.save()

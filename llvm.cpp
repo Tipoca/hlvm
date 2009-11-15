@@ -2,8 +2,8 @@
 
 extern "C" {
 
-void enable_tail_call_opt() {
-  llvm::PerformTailCallOpt = true;
-}
-
+  void enable_tail_call_opt() {
+    llvm::PerformTailCallOpt = true;
+  }
+  
 }

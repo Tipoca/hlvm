@@ -348,6 +348,9 @@ let view = ref false
     generated code. Enabled by the command-line argument "--debug". *)
 let debug = ref false
 
+(** Compile without evaluating. *)
+let compile_only = ref false
+
 (** Binding to a function that enables TCO in LLVM. *)
 external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
 
@@ -791,7 +794,9 @@ let run_function llf =
   eval_functions := !eval_functions @ [llf];
   (* We pass a single dummy argument because the current OCaml bindings in
      LLVM are broken if no arguments are passed (they call malloc(0)). *)
-  ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee
+  if not !compile_only then
+    ignore
+      (ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee)
 
 (* Push a reference onto the visit stack. *)
 let gc_push p =
@@ -1236,7 +1241,7 @@ and def vars = function
 
       let body = Expr.unroll f args (Expr.unroll f args body) in
 
-      if true || !debug then
+      if !debug then
 	printf "%s: %d subexpressions\n%!" f (Expr.count body);
 
       defun vars cc f args ty_ret
@@ -1249,7 +1254,7 @@ and def vars = function
 
       let body = Expr.unroll f args (Expr.unroll f args body) in
 
-      if true || !debug then
+      if !debug then
 	printf "%s: %d subexpressions\n%!" f (Expr.count body);
 
       defun vars cc f args ty_ret
@@ -1490,7 +1495,8 @@ and init_type name llty llvisit llprint =
   let llvm_f, _ = List.assoc f vars.vals in
   ignore(run_function llvm_f)
 
-(** Create and memoize a function. Used to create visitor functions. *)
+(** Create and memoize a function. Used to create visitor functions, print
+    functions and array fill functions. *)
 and mk_fun vars cc f args ty_ret body =
   if !debug then
     printf "mk_fun %s\n%!" f;
@@ -1554,7 +1560,7 @@ let init() =
 	   (state#bitcast
 	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_time"])
 	      lltime_ty);
-	 let n = 1 lsl 25 in
+	 let n = 1 lsl 22 in
 	 let state, _ =
 	   expr vars state
 	     (compound [ Store(stack, Alloc(Int n, Null));
@@ -1676,6 +1682,7 @@ let save() =
 let () =
   Array.iter (function
 		| "--debug" -> debug := true
+		| "--compile" -> compile_only := true
 		| "--view-functions" -> view := true
 		| "--no-shadow-stack" ->
 		    printf "Shadow stack and GC disabled.\n%!";

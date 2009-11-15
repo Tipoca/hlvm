@@ -1,4 +1,3 @@
-//#include "llvm-c/Core.h"
 #include "caml/alloc.h"
 #include "caml/custom.h"
 #include "caml/memory.h"
