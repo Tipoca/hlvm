@@ -5,12 +5,59 @@
     "Building a Virtual Machine with LLVM" from January to March 2009.
 *)
 
+(* FIXME:
+
+   Need to unpack and repack all struct arguments across function boundaries in
+   order to avoid the bug with TCO.
+
+   Code allows arbitrary code to be injected into the compilation process.
+
+   Allocating null array should use null mark state.
+
+   Dereferencing type etc. must check for NULL, e.g. visit and print.
+
+
+With undef i8*
+ add([|(0, [||])|], Int(-1))
+append([||], (Int(-1), false))
+Tail call from append to aux([||], [|(Int(-1), false)|], 0, (Int(-1), false))
+aux return [|(Int(-1), false)|]
+==30698== Invalid read of size 4
+==30698==    at 0x804CD90: ??? (in /home/jdh30/Programs/mine/ocaml/hlvm/hlvm/aout)
+==30698==  Address 0x6d is not stack'd, malloc'd or (recently) free'd
+*)
+
 open Printf
 open Llvm
 open Llvm_executionengine
 open Llvm_target
 open Llvm_scalar_opts
 open Llvm_analysis
+
+module Options = struct
+  (** Global boolean to enable viewing of generated functions. *)
+  let view = ref false
+    
+  (** Global boolean to enable debug output in both the compiler and the
+      generated code. Enabled by the command-line argument "--debug". *)
+  let debug = ref false
+    
+  (** Compile without evaluating. *)
+  let compile_only = ref false
+  
+  (** Allow the GC to be disabled. *)
+  let gc_enabled = ref true
+
+  (** Allow the shadow stack to be disabled. *)
+  let shadow_stack_enabled = ref true
+
+  (** Maximum depth of the shadow stacks, visit stack and allocated list. *)
+  let max_depth =
+    1 lsl 22
+
+  (** Tail call elimination enabled. *)
+  let tco = ref true
+end
 
 module Type = struct
   (** The type system. *)
@@ -33,7 +80,7 @@ module Type = struct
     | [h] -> f () h
     | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
   
-  let rec to_string () : t -> string = function
+ let rec to_string () : t -> string = function
     | `Unit -> "`Unit"
     | `Bool -> "`Bool"
     | `Int -> "`Int"
@@ -130,7 +177,25 @@ module Expr = struct
         (** For internal use only. Set the mark byte of a reference type. *)
     | Time
 	(** Read the current time as a `Float. *)
-  
+    | CreateThread of t * t
+	(** Create and initialize a thread and apply the given function to the
+	    given argument on it. *)
+    | JoinThread of t
+	(** Join with the given thread. *)
+    | CreateMutex
+	(** Create a mutex. *)
+    | UnsafeLockMutex of t
+	(** Lock a mutex. *)
+    | UnlockMutex of t
+	(** Unlock a mutex. *)
+    | GetThreadLocal
+	(** Read thread local data. *)
+    | SetThreadLocal of t
+	(** Write thread local data. *)
+    | Unsafe of t
+	(** Do not inject GC-related instructions when compiling this
+	    subexpression. *)
+
   (** Helper operators. *)
   let ( <: ) f g = Cmp(`Lt, f, g)
   let ( <=: ) f g = Cmp(`Le, f, g)
@@ -245,10 +310,24 @@ module Expr = struct
     | SetMark(f, n) ->
         sprintf "SetMark(%a, %d)" to_string f n
     | Time -> "Time"
+    | CreateThread(f, x) ->
+        sprintf "CreateThread(%a, %a)" to_string f to_string x
+    | JoinThread f ->
+        sprintf "JoinThread(%a)" to_string f
+    | CreateMutex -> "CreateMutex"
+    | UnsafeLockMutex f ->
+        sprintf "UnsafeLockMutex(%a)" to_string f
+    | UnlockMutex f ->
+        sprintf "UnlockMutex(%a)" to_string f
+    | GetThreadLocal -> "GetThreadLocal"
+    | SetThreadLocal f ->
+        sprintf "SetThreadLocal(%a)" to_string f
+    | Unsafe f ->
+        sprintf "Unsafe(%a)" to_string f
   and to_strings sep = list_to_string to_string sep
   
   (** Apply the given rule to the next level of subexpressions. *)
-  let rec rewrite r = function
+  let rewrite r = function
     | Struct es -> Struct(List.map r es)
     | GetValue(e, i) -> GetValue(r e, i)
     | UnArith(op, f) -> UnArith(op, r f)
@@ -276,6 +355,12 @@ module Expr = struct
     | Magic(v, ty) -> Magic(r v, ty)
     | GetMark v -> GetMark(r v)
     | SetMark(v, n) -> SetMark(r v, n)
+    | CreateThread(f, x) -> CreateThread(r f, r x)
+    | JoinThread f -> JoinThread(r f)
+    | UnsafeLockMutex f -> UnsafeLockMutex(r f)
+    | UnlockMutex f -> UnlockMutex(r f)
+    | SetThreadLocal f -> SetThreadLocal(r f)
+    | Unsafe f -> Unsafe(r f)
     
     | Null
     | Unit
@@ -286,7 +371,14 @@ module Expr = struct
     | Load _
     | Store _
     | Llvalue _
-    | Time as e -> e
+    | Time
+    | CreateMutex
+    | GetThreadLocal as e -> e
+
+  let rec apply_tail r = function
+    | If(p, t, f) -> If(p, apply_tail r t, apply_tail r f)
+    | Let(x, body, rest) -> Let(x, body, apply_tail r rest)
+    | f -> r f
 
   let count f =
     let n = ref 0 in
@@ -311,11 +403,66 @@ module Expr = struct
     | e -> rewrite (unroll_rule f params body) e
   
   let rec unroll f args body body' =
-    if count body' > 4000 then body' else
+    if count body' > 1000 then body' else
       rewrite (unroll_rule f (List.map fst args) body) body'
 
+  let rec nest n f x =
+    if n=0 then x else nest (n-1) f (f x)
+
   let unroll f args body =
-    unroll f args body (unroll f args body (unroll f args body body))
+    nest 8 (unroll f args body) body
+
+  let dPrintf(string, args) =
+    if !Options.debug then
+      Printf(string, args)
+    else
+      Unit
+
+  let d2Printf(s, xs) = Printf(s, xs)
+  let d2Printf _ = Unit
+
+  let lock(mutex, body) =
+    Let("mutex", mutex,
+	compound
+	  [ d2Printf("%p locking %p\n", [AddressOf GetThreadLocal; mutex]);
+	    UnsafeLockMutex(Var "mutex");
+	    Let("result", body,
+		compound
+		  [ d2Printf("%p unlocking %p\n", [AddressOf GetThreadLocal; mutex]);
+		    UnlockMutex(Var "mutex");
+		    Var "result" ])])
+
+  let rec trace_rule fn = function
+    | If(p, t, f) -> If(p, trace_rule fn t, trace_rule fn f)
+    | Let(x, f, g) -> Let(x, f, trace_rule fn g)
+    | Apply(f, gs) ->
+	let rec loop i xs = function
+	  | [] ->
+	      compound
+		[ Printf("Tail call from "^fn^" to ", []);
+		  Apply(Var "trace", List.rev xs) ]
+	  | g::gs ->
+	      let x = sprintf "arg%d" i in
+	      Let(x, g, loop (i+1) (Var x::xs) gs) in
+	Let("trace", f, loop 0 [] gs)
+    | f ->
+	Let("trace", f,
+	    compound
+	      [ Printf(fn^" return ", []);
+		Print(Var "trace");
+		Printf("\n", []);
+		Var "trace" ])
+
+  (** Insert debug information at the beginning of each function. *)
+  let rec trace(f, args, ty_ret, body) =
+    let body = trace_rule f body in
+    printf "%s %s\n" f (to_string () body);
+    (f, args, ty_ret,
+     compound
+       [Printf(f, []);
+	Print(Struct(List.map (fun (x, _) -> Var x) args));
+	Printf("\n", []);
+	body ])
 end
 
 open Expr
@@ -341,20 +488,10 @@ module List = struct
     | x::xs -> x::sep::between sep xs
 end
 
-(** Global boolean to enable viewing of generated functions. *)
-let view = ref false
-
-(** Global boolean to enable debug output in both the compiler and the
-    generated code. Enabled by the command-line argument "--debug". *)
-let debug = ref false
-
-(** Compile without evaluating. *)
-let compile_only = ref false
-
 (** Binding to a function that enables TCO in LLVM. *)
 external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
 
-let llcontext = create_context()
+let llcontext = global_context()
 
 let void_type = void_type llcontext
 
@@ -377,9 +514,6 @@ let mk_struct state vs =
   let llty = struct_type (Array.of_list(List.map type_of vs)) in
   let aux (i, s) x = i+1, build_insertvalue s x i "" state#bb in
   snd(List.fold_left aux (0, undef llty) vs)
-
-(** Turn on TCO in LLVM. *)
-let () = enable_tail_call_opt()
 
 let extractvalue state s i =
   build_extractvalue s i "" state#bb
@@ -432,7 +566,7 @@ end
 
 (** Convert a type from our type system into LLVM's type system. *)
 let rec lltype_of : Type.t -> lltype = function
-  | `Unit -> string_type
+  | `Unit -> int_type
   | `Int -> int_type
   | `Bool -> i1_type
   | `Float -> double_type
@@ -472,11 +606,11 @@ end
 let print_type_of v =
   printf "%s\n%!" (string_of_lltype(type_of v))
 
-(** LLVM value used to represent the value () of the type unit. *)
-let unit = undef string_type
-
 (** Create an LLVM native int. *)
 let int n = const_int int_type n
+
+(** LLVM value used to represent the value () of the type unit. *)
+let unit = int 0
 
 (** Create an LLVM 8-bit int. *)
 let int8 n = const_int i8_type n
@@ -520,21 +654,173 @@ let ee =
   ignore(Llvm_executionengine.initialize_native_target());
   ExecutionEngine.create_jit mp
 
-(** The shadow stack is an array of reference types. *)
-(* FIXME: Should be dynamically resized. *)
-let stack =
-  define_global "shadow_stack" (const_null(lltype_of(`Array `Reference))) m
+let ( <-- ) (x, ty) f =
+  Store(x, f (Load(x, ty)))
 
-(** Number of references on the shadow stack. *)
-let stack_depth = define_global "shadow_stack_depth" (int 0) m
+(** Type used to represent stacks and unordered sequences (bags). *)
+(* FIXME: Sequences should resize themselves when more space is required
+   and free old versions if necessary. *)
+module Seq = struct
+  (** Type of a bag (unsorted collection). *)
+  let ty ty = `Struct[`Int; `Array ty]
+
+  (** Construct an empty sequence. *)
+  let empty x = Struct[Int 0; Alloc(Int Options.max_depth, x)]
+
+  (** Extract internal array from sequence. *)
+  let arr seq = GetValue(seq, 1)
+
+  (** Fetch element at index in a sequence. *)
+  let get(seq, i) = Get(arr seq, i)
+
+  (** Set element at index in a sequence. *)
+  let set(seq, i, x) = Set(arr seq, i, x)
+
+  (** Deallocate a sequence. *)
+  let free seq = Free(arr seq)
+
+  (** Number of elements in a sequence. *)
+  let count seq = GetValue(seq, 0)
+
+  (** Append an element to a sequence. *)
+  let push(seq, x) =
+    compound
+      [ set(seq, count seq, x);
+	Struct[count seq +: Int 1; arr seq] ]
+
+  let remove_at(seq, i) =
+    compound
+      [ set(seq, i, get(seq, count seq -: Int 1));
+	Struct[count seq -: Int 1; arr seq] ]
+end
+
+module State = struct
+  let run, suspend = 0, 1
+end
+
+
+module ThreadLocal = struct
+  let internal_ty = `Struct[`Int; `Array `Int; Seq.ty `Reference]
+
+  (** Type of thread-local state. *)
+  let ty = `Array internal_ty
+
+  let make =
+    if !Options.gc_enabled then
+      Alloc(Int 1, Struct[CreateMutex;
+			  Alloc(Int 1, Int State.run);
+			  Seq.empty Null])
+    else
+      Alloc(Int 0, Struct[Int 0;
+			  Alloc(Int 0, Int 0);
+			  Struct[Int 0; Alloc(Int 0, Null)]])
+
+  (** Allocate new thread local state. *)
+  let make =
+    let f s b k =
+      compound
+	[ dPrintf(s^"\n", []);
+	  Let(s, b, k) ] in
+    compound
+      [ dPrintf("ThreadLocal.make\n", []);
+	f "mutex" CreateMutex
+	  (f "state" (Alloc(Int 1, Int State.run))
+	     (f "stack" (Seq.empty Null)
+		(f "thread_local" (Alloc(Int 1, Struct[Var "mutex"; Var "state"; Var "stack"]))
+		(compound [dPrintf("ThreadLocal.make ends\n", []);
+			   Var "thread_local"])))) ]
+
+  let mutex_of tl = GetValue(Get(tl, Int 0), 0)
+
+  let state_of tl = GetValue(Get(tl, Int 0), 1)
+
+  let stack_of tl = GetValue(Get(tl, Int 0), 2)
+
+  let free tl =
+    compound
+      [ Free(state_of tl);
+	Seq.free(stack_of tl);
+	Free tl ]
+
+  let load_state tl =
+    Let("tl", Get(tl, Int 0),
+	compound [ dPrintf("%p ThreadLocal.load_state %p\n", [AddressOf GetThreadLocal; GetValue(Var "tl", 0)]);
+		   lock(GetValue(Var "tl", 0),
+			Get(GetValue(Var "tl", 1), Int 0)) ])
+	  
+  let store_state tl n =
+    Let("tl", Get(tl, Int 0),
+	compound [ dPrintf("%p ThreadLocal.store_state %p\n", [AddressOf GetThreadLocal; GetValue(Var "tl", 0)]);
+		   lock(GetValue(Var "tl", 0),
+			Set(GetValue(Var "tl", 1), Int 0, Int n)) ])
+
+  let eq x y = AddressOf x =: AddressOf y
+end
+
+module ThreadGlobal = struct
+  let list_mutex = define_global "threadglobal_mutex" (int 0) m
+
+  let ty = Seq.ty ThreadLocal.ty
+
+  let list = define_global "threadglobal_list" (const_null(lltype_of ty)) m
+
+  let lock_list f =
+    compound [ dPrintf("%p ThreadGlobal.lock_list %p\n", [AddressOf GetThreadLocal; Load(list_mutex, `Int)]);
+	       lock(Load(list_mutex, `Int), f) ]
+
+  let load_list = Load(list, ty)
+
+  let store_list xs = Store(list, xs)
+
+  let state_mutex = define_global "threadglobal_state_mutex" (int 0) m
+
+  let state = define_global "threadglobal_state" (int 0) m
+
+  let lock_state f =
+    compound [ d2Printf("%p ThreadGlobal.lock_state %p\n", [AddressOf GetThreadLocal; Load(state_mutex, `Int)]);
+	       lock(Load(state_mutex, `Int), f) ]
+
+  let load_state = Load(state, `Int)
+
+  let store_state n = Store(state, Int n)
+
+  let init =
+    compound
+      [ dPrintf("Creating global thread list mutex...\n", []);
+	Store(list_mutex, CreateMutex);
+	dPrintf("Creating global thread state mutex...\n", []);
+	Store(state_mutex, CreateMutex) ]
+end
+
+let enter_blocking_section =
+  compound
+    [ dPrintf("%p entering blocking section\n", [AddressOf GetThreadLocal]);
+      ThreadLocal.store_state GetThreadLocal State.suspend ]
+
+let leave_blocking_section =
+  If(ThreadGlobal.load_state =: Int State.suspend,
+     compound
+       [ dPrintf("%p suspending itself\n", [AddressOf GetThreadLocal]);
+	 ThreadLocal.store_state GetThreadLocal State.suspend;
+	 Apply(Var "spin", []);
+	 ThreadLocal.store_state GetThreadLocal State.run;
+       ],
+     dPrintf("%p leaving blocking section\n", [AddressOf GetThreadLocal]))
+
+let lockMutex f =
+  Let("mutex", f,
+      compound [ enter_blocking_section;
+		 UnsafeLockMutex(Var "mutex");
+		 leave_blocking_section ])
 
 (** The visit stack is an array of unvisited reference types. *)
-(* FIXME: Should be dynamically resized. *)
 let visit_stack =
   define_global "visit_stack" (const_null(lltype_of(`Array `Reference))) m
 
 (** Number of unvisited references on the visit stack. *)
 let n_visit = define_global "n_visit" (int 0) m
+
+let allocated_mutex = define_global "allocated_mutex" (int 0) m
 
 (** The allocated list is an array of reference types. *)
 let allocated =
@@ -544,50 +830,85 @@ let allocated =
 let n_allocated = define_global "n_allocated" (int 0) m
 
 (** Number of allocations required to incur a garbage collection. *)
-let quota = define_global "quota" (int 0) m
+let quota = define_global "quota" (int 256) m
 
-(** LLVM declaration of C's putchar function. *)
-let llputchar =
-  declare_function "putchar" (function_type int_type [|int_type|]) m
+module Extern = struct
+  (** LLVM declaration of C's putchar function. *)
+  let putchar =
+    declare_function "putchar" (function_type int_type [|int_type|]) m
+      
+  (** LLVM declaration of C's exit function. *)
+  let exit =
+    declare_function "exit" (function_type void_type [|int_type|]) m
+      
+  (** LLVM declaration of C's printf function. *)
+  let printf =
+    declare_function "printf"
+      (var_arg_function_type int_type [|string_type|]) m
+      
+  (** LLVM declaration of libdl's dlopen function. *)
+  let dlopen =
+    declare_function "dlopen"
+      (function_type string_type [|string_type; int_type|]) m
+      
+  (** LLVM declaration of libdl's dlsym function. *)
+  let dlsym =
+    declare_function "dlsym"
+      (function_type string_type [|string_type; string_type|]) m
+      
+  let dlfn f ty_ret ty_args =
+    let ty = pointer_type(function_type ty_ret (Array.of_list ty_args)) in
+    let ptr = define_global f (const_null ty) m in
+  object
+    method ty = ty
+    method ptr = ptr
+  end
+  
+  let alloc = dlfn "hlvm_alloc" string_type [int_type; int_type]
+  
+  let free = dlfn "hlvm_free" void_type [string_type]
 
-(** LLVM declaration of C's exit function. *)
-let llexit =
-  declare_function "exit" (function_type void_type [|int_type|]) m
+  let time = dlfn "hlvm_time" double_type []
 
-(** LLVM declaration of C's printf function. *)
-let llprintf =
-  declare_function "printf" (var_arg_function_type int_type [|string_type|]) m
+  let init = dlfn "hlvm_init" void_type []
 
-(** LLVM declaration of libdl's dlopen function. *)
-let lldlopen =
-  declare_function "dlopen"
-    (function_type string_type [|string_type; int_type|]) m
+  let create_thread =
+    dlfn "hlvm_create_thread" string_type [string_type; int_type]
 
-(** LLVM declaration of libdl's dlsym function. *)
-let lldlsym =
-  declare_function "dlsym"
-    (function_type string_type [|string_type; string_type|]) m
+  let join_thread = dlfn "hlvm_join_thread" void_type [string_type]
 
-(** LLVM type of the hlvm_alloc function. *)
-let llalloc_ty = pointer_type(function_type string_type [|int_type; int_type|])
+  let create_mutex = dlfn "hlvm_create_mutex" int_type []
 
-(** LLVM global to store the dynamically-loaded hlvm_alloc function. *)
-let llalloc = define_global "hlvm_alloc" (const_null llalloc_ty) m
+  let lock_mutex = dlfn "hlvm_lock_mutex" void_type [int_type]
 
-(** LLVM type of the hlvm_free function. *)
-let llfree_ty = pointer_type(function_type void_type [|string_type|])
+  let unlock_mutex = dlfn "hlvm_unlock_mutex" void_type [int_type]
 
-(** LLVM global to store the dynamically-loaded hlvm_free function. *)
-let llfree = define_global "hlvm_free" (const_null llfree_ty) m
+  let get_thread_local = dlfn "hlvm_get_thread_local" int_type []
 
-(** LLVM type of the hlvm_time function. *)
-let lltime_ty = pointer_type(function_type double_type [||])
+  let set_thread_local = dlfn "hlvm_set_thread_local" void_type [int_type]
 
-(** LLVM global to store the dynamically-loaded hlvm_time function. *)
-let lltime = define_global "hlvm_time" (const_null lltime_ty) m
+  (** Initialize all of the dynamically-loaded functions. *)
+  let load_fns load_fn =
+    load_fn alloc "hlvm_alloc";
+    load_fn free "hlvm_free";
+    load_fn time "hlvm_time";
+    load_fn init "hlvm_init";
+    load_fn create_thread "hlvm_create_thread";
+    load_fn join_thread "hlvm_join_thread";
+    load_fn create_mutex "hlvm_create_mutex";
+    load_fn lock_mutex "hlvm_lock_mutex";
+    load_fn unlock_mutex "hlvm_unlock_mutex";
+    load_fn get_thread_local "hlvm_get_thread_local";
+    load_fn set_thread_local "hlvm_set_thread_local"
+end
 
+(** LLVM global to store the total time spent in the suspend phase. *)
+let suspend_time = define_global "suspend_time" (const_float double_type 0.0) m
+
+(** LLVM global to store the total time spent in the mark phase. *)
 let mark_time = define_global "mark_time" (const_float double_type 0.0) m
 
+(** LLVM global to store the total time spent in the sweep phase. *)
 let sweep_time = define_global "sweep_time" (const_float double_type 0.0) m
 
 (** Default calling convention used by HLVM. *)
@@ -600,7 +921,7 @@ type vars =
 (** Default variable bindings. *)
 let vars = { vals = [] }
 
-(** Bound types types (including internal types such as wrapper reference
+(** Bound types (including internal types such as wrapper reference
     types for arrays). *)
 let types = Hashtbl.create 1
 
@@ -616,12 +937,10 @@ let find_type name =
 (** Bind a new variable. *)
 let add_val x vars = { vals = x :: vars.vals }
 
-let shadow_stack_enabled = ref true
-
 (** Push a reference type onto the shadow stack. *)
 let push self stack depth v =
-  if !shadow_stack_enabled then begin
-    if !debug then
+  if !Options.shadow_stack_enabled then begin
+    if !Options.debug then
       printf "state#push\n%!";
     let d = self#load depth [int 0] in
     let data = extractvalue self (self#load stack [int 0]) Ref.data in
@@ -630,19 +949,29 @@ let push self stack depth v =
     self#store depth [int 0] (build_add (int 1) d "" self#bb)
   end
 
+(** Get pointers to the stack depth and stack. *)
+(* FIXME: This hack should be replaced with term rewriting. *)
+let get_stack state =
+  let get_thread_local = state#load Extern.get_thread_local#ptr [int 0] in
+  let data = state#call CallConv.c get_thread_local [] in
+  let data = state#ptr_of_int data (pointer_type(lltype_of ThreadLocal.internal_ty)) in
+  state#gep data [int 0; int32 2; int32 0],
+  state#gep data [int 0; int32 2; int32 1]
+
 (** Restore the shadow stack by resetting its depth to an older value. *)
-let gc_restore self =
-  if !shadow_stack_enabled then begin
-    if !debug then
+let gc_restore state =
+  if !Options.shadow_stack_enabled then begin
+    if !Options.debug then
       printf "state#restore\n%!";
-    self#store stack_depth [int 0] self#odepth
+    let stack_depth, _ = get_stack state in
+    state#store stack_depth [int 0] state#odepth
   end
 
 (** Create a state object that encapsulates our interface for emitting LLVM
     instructions. *)
 class state func = object (self : 'self)
   val blk = entry_block func
-  val odepth = int 0
+  val odepth = lazy(int 0)
   val gc_enabled = true
   val roots = false
 
@@ -665,13 +994,13 @@ class state func = object (self : 'self)
   (** Issue LLVM instructions to call the hlvm_alloc function. *)
   method malloc llty n =
     let size = build_trunc (size_of llty) int_type "" self#bb in
-    let llalloc = self#load llalloc [int 0] in
+    let llalloc = self#load Extern.alloc#ptr [int 0] in
     let data = build_call llalloc [|n; size|] "" self#bb in
     self#bitcast data (pointer_type llty)
 
   (** Issue LLVM instructions to call the hlvm_free function. *)
   method free x =
-    let llfree = self#load llfree [int 0] in
+    let llfree = self#load Extern.free#ptr [int 0] in
     ignore(build_call llfree [|x|] "" self#bb)
 
   (** Define a global LLVM variable. *)
@@ -694,7 +1023,7 @@ class state func = object (self : 'self)
   method call cc f args =
     let call = build_call f (Array.of_list args) "" self#bb in
     set_instruction_call_conv cc call;
-    call
+      call
 
   (** Get the LLVM value of the pointer to the return struct. *)
   method sret = param func 0
@@ -706,12 +1035,14 @@ class state func = object (self : 'self)
   (** Are we emitting code to keep the GC informed. *)
   method gc_enabled = gc_enabled
 
-  (** Register the given values as a global root for the GC. *)
+  (** Push the given value of a reference type onto the shadow stack. *)
   method gc_root v =
-    if not gc_enabled then self else begin
+    if gc_enabled && !Options.shadow_stack_enabled then
+      let stack_depth, stack = get_stack self in
       push self stack stack_depth v;
       {< roots = true >}
-    end
+    else
+      self
 
   (** Restore the shadow stack depth to the value it was when this function
       was entered. *)
@@ -721,10 +1052,10 @@ class state func = object (self : 'self)
 
   (** Return a "state" object that will not inject instructions to keep the
       GC informed. *)
-  method no_gc = {< gc_enabled = false >}
+  method gc enabled = {< gc_enabled = enabled >}
 
   (** Depth the shadow stack was at when this function was entered. *)
-  method odepth = odepth
+  method odepth = Lazy.force odepth
 
   (** Prepare to reset the shadow stack depth to this value. *)
   method set_depth d = {< odepth = d >}
@@ -737,14 +1068,20 @@ class state func = object (self : 'self)
 
   (** Issue LLVM instructions to call the hlvm_time function. *)
   method time =
-    let lltime = self#load lltime [int 0] in
+    let lltime = self#load Extern.time#ptr [int 0] in
     build_call lltime [||] "" self#bb
 end
 
 (** Create a state object and save the current shadow stack depth. *)
 let mk_state func =
   let state = new state func in
-  state#set_depth(state#load stack_depth [int 0])
+  let depth state =
+    if state#gc_enabled && !Options.shadow_stack_enabled then
+      let stack_depth, _ = get_stack state in
+      state#load stack_depth [int 0]
+    else
+      int 0 in
+  state#set_depth(lazy(depth state))
 
 (** Create a unique string based upon the given string. *)
 let uniq =
@@ -794,7 +1131,7 @@ let run_function llf =
   eval_functions := !eval_functions @ [llf];
   (* We pass a single dummy argument because the current OCaml bindings in
      LLVM are broken if no arguments are passed (they call malloc(0)). *)
-  if not !compile_only then
+  if not !Options.compile_only then
     ignore
       (ExecutionEngine.run_function llf [|GenericValue.of_int int_type 0|] ee)
 
@@ -808,10 +1145,12 @@ let gc_push p =
 		   [ Set(Var "a", Var "n", Var "p");
 		     Store(n_visit, Var "n" +: Int 1) ]))))
 
+let llty_null = ref None
+
 (** Compile an expression in the context of current vars into the given
     LLVM state. *)
 let rec expr vars (state: state) e =
-  if !debug then
+  if !Options.debug then
     printf "-> expr %s\n%!" (Expr.to_string () e);
   let state, (x, ty_x) as ret =
     try expr_aux vars state e with
@@ -819,11 +1158,33 @@ let rec expr vars (state: state) e =
     | exn ->
 	printf "ERROR: %s\n%!" (Expr.to_string () e);
 	raise exn in
-  if !debug then
+  if !Options.debug then
     printf "<- %s\n%!" (string_of_lltype(type_of x));
   ret
 and expr_aux vars state = function
-  | Null -> state, (Ref.mk state null (int 0) null null, `Reference)
+  | Return(Unsafe f, ty) -> expr vars state (Unsafe(Return(f, ty)))
+  | Unsafe f ->
+      let enabled = state#gc_enabled in
+      let state, result = expr vars (state#gc false) f in
+      state#gc enabled, result
+  | Null ->
+      let llty =
+	match !llty_null with
+	| Some llty -> llty
+	| None ->
+	    let name = "Null" and ty = `Unit in
+	    let llty = define_global name (undef RTType.lltype) m in
+	    Hashtbl.add types name (llty, ty);
+	    let llvisit = def_visit vars name name ty in
+	    let llprint = def_print vars name name ty in
+	    init_type name llty llvisit llprint;
+	    llty_null := Some llty;
+	    llty in
+      state, (Ref.mk state llty (int 0) null null, `Reference)
+	(*
+	  expr vars state (Magic(Alloc(Int 0, Int 0), `Reference))
+	  state, (Ref.mk state null (int 0) null null, `Reference)
+	*)
   | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Int n -> state, (int n, `Int)
@@ -838,7 +1199,7 @@ and expr_aux vars state = function
 	| `Struct tys ->
 	    let v = extractvalue state s i in
 	    state, (v, List.nth tys i)
-	| _ -> assert false
+	| ty -> invalid_arg(sprintf "GetValue of %a" Type.to_string ty)
       end
   | Construct(f, x) ->
       let llty, ty = find_type f in
@@ -945,15 +1306,17 @@ and expr_aux vars state = function
       let state, (n, ty_n), (x, ty_x) = expr2 vars state n x in
       type_check "Alloc with non-int length" ty_n `Int;
       let data = state#malloc (lltype_of ty_x) n in
+      (* FIXME: We're allocating mark state for NULL arrays. *)
       let mark = state#malloc i8_type (int 1) in
       let a = Ref.mk state (mk_array_type ty_x) n data mark in
       let ty_a = `Array ty_x in
+      let fill = fill vars ty_x in
+      let state, _ = expr vars state (Unsafe(Apply(fill, [Llvalue(a, `Array ty_x);
+							  Llvalue(x, ty_x);
+							  Int 0;
+							  Llvalue(n, `Int)]))) in
       let state = gc_root vars state a ty_a in
       let state = gc_alloc vars state a in
-      let fill = fill vars ty_x in
-      let state, _ = expr vars state (Apply(fill, [Llvalue(a, `Array ty_x);
-						   Llvalue(x, ty_x);
-						   Int 0])) in
       state, (a, ty_a)
   | Length a ->
       let state, (a, ty_a) = expr vars state a in
@@ -997,15 +1360,16 @@ and expr_aux vars state = function
       let state, (args, tys_arg) = exprs vars state args in
       state#gc_restore();
       type_check "Function" ty_f (`Function(tys_arg, ty_ret));
-      let call, ty_ret =
+      let call =
 	if is_struct ty_ret then
 	  (* Tail call returning struct. Pass the sret given to us by our
 	     caller on to our tail callee. *)
-          state#call cc f (state#sret :: args), `Unit
+          state#call cc f (state#sret :: args)
 	else
 	  (* Tail call returning single value. *)
-	  state#call cc f args, ty_ret in
-      set_tail_call true call;
+	  state#call cc f args in
+      if !Options.tco then
+	set_tail_call true call;
       state#ret call;
       raise Returned
   | Apply(f, args) ->
@@ -1033,7 +1397,7 @@ and expr_aux vars state = function
 	if type_of x <> float_type then x else
 	  build_fpext x double_type "" state#bb in
       let args = List.map ext args in
-      ignore(state#call CallConv.c llprintf (spec::args));
+      ignore(state#call CallConv.c Extern.printf (spec::args));
       state, (unit, `Unit)
   | IntOfFloat f ->
       let state, (f, ty_f) = expr vars state f in
@@ -1065,13 +1429,17 @@ and expr_aux vars state = function
 	| `Function _ -> expr vars state (Printf("<fun>", []))
 	| `Array _
 	| `Reference ->
-	    let llty = extractvalue state f Ref.llty in
-	    let llty = state#bitcast llty (pointer_type RTType.lltype) in
-	    let llty = state#load llty [int 0] in
-	    let p = extractvalue state llty RTType.print in
-	    let ty_p = `Function([ty_f], `Unit) in
-	    let vars = add_val ("p", (p, ty_p)) vars in
-	    expr vars state (Apply(Var "p", [Var "x"]))
+	    expr vars state
+	      (Printf("<abstr>", []))
+	      (*
+		let llty = extractvalue state f Ref.llty in
+		let llty = state#bitcast llty (pointer_type RTType.lltype) in
+		let llty = state#load llty [int 0] in
+		let p = extractvalue state llty RTType.print in
+		let ty_p = `Function([ty_f], `Unit) in
+		let vars = add_val ("p", (p, ty_p)) vars in
+		expr vars state (Apply(Var "p", [Var "x"]))
+	      *)
       end
   | Visit f ->
       let state, (f, ty_f) = expr vars state f in
@@ -1099,24 +1467,33 @@ and expr_aux vars state = function
       state, (unit, `Unit)
   | Exit f ->
       let state, (f, ty_f) = expr vars state f in
-      ignore(state#call CallConv.c llexit [f]);
+      type_check "Exit" ty_f `Int;
+      ignore(state#call CallConv.c Extern.exit [f]);
       state, (unit, `Unit)
-  | Load(addr, ty) -> state, (state#load addr [int 0], ty)
-  | Store(addr, f) ->
+  | Load(ptr, ty) ->
+      state, (state#load ptr [int 0], ty)
+  | Store(ptr, f) ->
       let state, (f, ty_f) = expr vars state f in
-      state#store addr [int 0] f;
+      state#store ptr [int 0] f;
       state, (unit, `Unit)
   | AddressOf f ->
       let state, (f, ty_f) = expr vars state f in
+      if not(is_ref_type ty_f) then
+	invalid_arg "AddressOf of non-reference";
       let ptr = extractvalue state f Ref.data in
       let ptr = state#int_of_ptr ptr in
       state, (ptr, `Int)
   | Llvalue(v, ty) -> state, (v, ty)
   | Magic(f, ty) ->
       let state, (f, ty_f) = expr vars state f in
-      if not(is_ref_type ty_f) then
-	invalid_arg "Magic of non-reference";
-      state, (f, ty)
+      begin
+	match ty_f, ty with
+	| `Int, `Array ty_elt ->
+	    let f = state#ptr_of_int f string_type in
+	    state, (Ref.mk state (mk_array_type ty_elt) (int 1) f null, ty)
+	| `Reference, `Array _ | `Array _, `Reference -> state, (f, ty)
+	| _ -> invalid_arg "Magic of non-(int|reference)";
+      end
   | Return(f, ty_ret) ->
       let state, (f, ty_f) = expr vars state f in
       type_check "Return" ty_ret ty_f;
@@ -1129,16 +1506,127 @@ and expr_aux vars state = function
       raise Returned
   | GetMark f ->
       let state, (f, ty_f) = expr vars state f in
+      if not(is_ref_type ty_f) then
+	invalid_arg "GetMark of non-reference";
       let mark = extractvalue state f Ref.mark in
+      let ptr = state#int_of_ptr mark in
+      let state, _ =
+	expr vars state
+	  (If(Llvalue(ptr, `Int) =: Int 0,
+	      compound [ Printf("Missing mark state\n", []);
+			 Exit(Int 1) ],
+	      Unit)) in
       let mark = state#load mark [int 0] in
       let mark = build_sext mark int_type "int_of_mark" state#bb in
       state, (mark, `Int)
   | SetMark(f, n) ->
       let state, (f, ty_f) = expr vars state f in
+      if not(is_ref_type ty_f) then
+	invalid_arg "GetMark of non-reference";
       let mark = extractvalue state f Ref.mark in
       state#store mark [int 0] (int8 n);
       state, (unit, `Unit)
   | Time -> state, (state#time, `Float)
+  | CreateThread(f, x) ->
+      let state, (f, f_ty), (x, x_ty) = expr2 vars state f x in
+      type_check "CreateThread" f_ty (`Function([x_ty], `Unit));
+      let state, (t, t_ty) =
+	expr vars state
+	  (Unsafe
+	     (compound
+		[ ThreadGlobal.lock_list
+		    (Let("t", ThreadLocal.make,
+			 compound
+			   [ ThreadGlobal.store_list
+			       (Seq.push(ThreadGlobal.load_list, Var "t"));
+			     Var "t" ])) ])) in
+      type_check "CreateThread internal" t_ty ThreadLocal.ty;
+      let state, (ptr, _) =
+	expr vars state
+	  (Unsafe(AddressOf(Alloc(Int 1, Struct[Llvalue(t, t_ty);
+						Llvalue(f, f_ty);
+						Llvalue(x, x_ty)])))) in
+      let cf =
+	(* Create a wrapper function with the C calling convention that
+	   unboxes "x", initializes the thread-local state and applies "f" to
+	   "x". *)
+	(* Note that the spawned thread will push its arguments onto its
+	   shadow stack before the first safe point (that the GC must wait
+	   for), so the argument can never get collected between becoming
+	   unreachable in this parent thread and reachable in the child
+	   thread. *)
+	let f_name = sprintf "hlvm_thread_apply<%a>()" Type.to_string x_ty in
+	mk_fun vars CallConv.c f_name ["ptr", `Int] `Unit
+	  (Unsafe
+	     (Let("tfx", Get(Magic(Var "ptr",
+				   `Array(`Struct[t_ty; f_ty; x_ty])), Int 0),
+		  compound
+		    [ Free(Var "ptr");
+		      dPrintf("%d registered threads\n",
+			      [Seq.count ThreadGlobal.load_list]);
+		      SetThreadLocal(GetValue(Var "tfx", 0));
+		      dPrintf("%p just starting\n", [AddressOf GetThreadLocal]);
+		      Apply(GetValue(Var "tfx", 1),
+			    [GetValue(Var "tfx", 2)]);
+		      ThreadLocal.store_state GetThreadLocal State.suspend;
+		      dPrintf("%p removing itself from global thread list\n", [AddressOf GetThreadLocal]);
+		      ThreadGlobal.lock_list
+			(ThreadGlobal.store_list
+			   (Apply(seq_remove ThreadLocal.eq ThreadLocal.ty,
+				  [ThreadGlobal.load_list;
+				   GetValue(Var "tfx", 0);
+				   Int 0])));
+		      dPrintf("%p terminating\n", [AddressOf GetThreadLocal]);
+		      ThreadLocal.free(GetValue(Var "tfx", 0));
+		      dPrintf("%d registered threads\n",
+			      [Seq.count ThreadGlobal.load_list]);
+		    ]))) in
+      let create_thread = state#load Extern.create_thread#ptr [int 0] in
+      let cf = state#bitcast cf string_type in
+      let thread = state#call CallConv.c create_thread [cf; ptr] in
+      state, (thread, `Int)
+  | JoinThread f ->
+      let state, (f, ty_f) = expr vars state f in
+      type_check "JoinThread" ty_f `Int;
+      let state, _ =
+	if not !Options.gc_enabled then state, (unit, `Unit) else
+	  expr vars state enter_blocking_section in
+      let join_thread = state#load Extern.join_thread#ptr [int 0] in
+      ignore(state#call CallConv.c join_thread [f]);
+      let state, _ =
+	if not !Options.gc_enabled then state, (unit, `Unit) else
+	  expr vars state leave_blocking_section in
+      state, (unit, `Unit)
+  | CreateMutex ->
+      let create_mutex = state#load Extern.create_mutex#ptr [int 0] in
+      let m = state#call CallConv.c create_mutex [] in
+      state, (m, `Int)
+  | UnsafeLockMutex f ->
+      let state, (f, ty_f) = expr vars state f in
+      type_check "UnsafeLockMutex" ty_f `Int;
+      let lock_mutex = state#load Extern.lock_mutex#ptr [int 0] in
+      ignore(state#call CallConv.c lock_mutex [f]);
+      state, (unit, `Unit)
+  | UnlockMutex f ->
+      let state, (f, ty_f) = expr vars state f in
+      type_check "UnlockMutex" ty_f `Int;
+      let unlock_mutex = state#load Extern.unlock_mutex#ptr [int 0] in
+      ignore(state#call CallConv.c unlock_mutex [f]);
+      state, (unit, `Unit)
+  | GetThreadLocal ->
+      let get_thread_local = state#load Extern.get_thread_local#ptr [int 0] in
+      let ptr = state#call CallConv.c get_thread_local [] in
+      let ptr = state#ptr_of_int ptr string_type in
+      let llty = mk_array_type ThreadLocal.internal_ty in
+      state, (Ref.mk state llty (int 1) ptr null, ThreadLocal.ty)
+  | SetThreadLocal f ->
+      let state, (f, ty_f) = expr vars state f in
+      type_check "SetThreadLocal" ty_f ThreadLocal.ty;
+      let ptr = extractvalue state f Ref.data in
+      let ptr = state#int_of_ptr ptr in
+      let set_thread_local = state#load Extern.set_thread_local#ptr [int 0] in
+      ignore(state#call CallConv.c set_thread_local [ptr]);
+      state, (unit, `Unit)
 
 (** Compile two expressions. *)
 and expr2 vars state f g =
@@ -1171,7 +1659,7 @@ and return vars state f ty_f =
     ()
 
 and gc_root_aux vars state v ty =
-  if !debug then
+  if !Options.debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
   match ty with
   | `Unit | `Bool | `Int | `Float | `Function _ -> state
@@ -1189,16 +1677,18 @@ and gc_root vars state v ty = gc_root_aux vars state (lazy v) ty
 
 (** Register an allocated value if necessary. *)
 and gc_alloc vars state v =
-  if not state#gc_enabled then state else
+  if not state#gc_enabled || not !Options.gc_enabled then state else
     let state, _ =
       expr vars state
 	(Let("p", Llvalue(v, `Reference),
 	     If(AddressOf(Var "p") =: Int 0, Unit,
-		Let("n", Load(n_allocated, `Int),
-		    compound
-		      [ Set(Load(allocated, `Array `Reference), Var "n",
-			    Var "p");
-			Store(n_allocated, Var "n" +: Int 1) ])))) in
+		Expr.lock
+		  (Load(allocated_mutex, `Int),
+		   Let("n", Load(n_allocated, `Int),
+		       compound
+			 [ Set(Load(allocated, `Array `Reference), Var "n",
+			       Var "p");
+			   Store(n_allocated, Var "n" +: Int 1) ]))))) in
     state
 
 (** Define a function with the given calling convention, name, arguments
@@ -1227,7 +1717,7 @@ and defun vars cc f args ty_ret k =
 
   let _ = entry#br start in
 
-  if !view then
+  if !Options.view then
     Llvm_analysis.view_function_cfg llvm_f;
   Llvm_analysis.assert_valid_function llvm_f;
 
@@ -1236,40 +1726,47 @@ and defun vars cc f args ty_ret k =
 (** Compile a top-level definition. *)
 and def vars = function
   | `UnsafeFunction(f, args, ty_ret, body) ->
-      if !debug then
+      let (f, args, ty_ret, body) =
+	(if !Options.debug then trace else (fun x -> x))
+	  (f, args, ty_ret, body) in
+
+      if !Options.debug then
 	eprintf "def %s\n%!" f;
 
-      let body = Expr.unroll f args (Expr.unroll f args body) in
+      let body = Expr.unroll f args body in
 
-      if !debug then
+      if !Options.debug then
 	printf "%s: %d subexpressions\n%!" f (Expr.count body);
 
       defun vars cc f args ty_ret
 	(fun vars state ->
-	   let state = state#no_gc in
-	   return vars state body ty_ret)
+	   return vars state (Unsafe body) ty_ret)
   | `Function(f, args, ty_ret, body) ->
-      if !debug then
+      let (f, args, ty_ret, body) =
+	(if !Options.debug then trace else (fun x -> x))
+	  (f, args, ty_ret, body) in
+
+      if !Options.debug then
 	eprintf "def %s\n%!" f;
 
-      let body = Expr.unroll f args (Expr.unroll f args body) in
+      let body = Expr.unroll f args body in
 
-      if !debug then
+      if !Options.debug then
 	printf "%s: %d subexpressions\n%!" f (Expr.count body);
 
       defun vars cc f args ty_ret
 	(fun vars state ->
+	   (* Push arguments of reference types onto the shadow stack. *)
 	   let state, (ps, ty_ps) =
 	     expr vars state
 	       (Struct(List.map (fun (s, _) -> Var s) args)) in
 	   let state = gc_root vars state ps ty_ps in
 	   let state, _ =
-	     expr vars state
-	       (If(Load(n_allocated, `Int) <=: Load(quota, `Int), Unit,
-		   Apply(Var "gc", [Unit]))) in
+	     if not !Options.gc_enabled then state, (unit, `Unit) else
+	       expr vars state (Apply(Var "gc_check", [])) in
 	   return vars state body ty_ret)
   | `Expr f ->
-      if !debug then
+      if !Options.debug then
 	eprintf "def <expr>\n%!";
 
       let ty_handler = function_type void_type [|int_type; string_type|] in
@@ -1286,9 +1783,9 @@ and def vars = function
 	let state = mk_state llvm_f in
 	String.iter
 	  (fun c ->
-	     ignore(state#call CallConv.c llputchar [int(Char.code c)]))
+	     ignore(state#call CallConv.c Extern.putchar [int(Char.code c)]))
 	  "Stack overflow\n";
-	let _ = state#call CallConv.c llexit [int 1] in
+	let _ = state#call CallConv.c Extern.exit [int 1] in
 	let _ = build_ret_void state#bb in
 	Llvm_analysis.assert_valid_function llvm_f;
 	llvm_f in
@@ -1303,14 +1800,17 @@ and def vars = function
 	     let _ =
 	       state#call CallConv.c stackoverflow_install_handler
 		 [llvm_handler; stack; int size] in
-	     let t1 = Llvalue(state#time, `Float) in
-	     let state, _ =
-	       if not !debug then state, (unit, `Unit) else
-		 expr vars state (Printf("# "^Expr.to_string () f^"\n", [])) in
+	     let start_time = Llvalue(state#time, `Float) in
+	     (*
+	       let state, _ =
+	       expr vars state
+	       (dPrintf("# "^Expr.to_string () f^"\n", [])) in
+	     *)
 	     let state, (f, ty_f) =
 	       expr vars state
 		 (compound
-		    [ Store(mark_time, Float 0.0);
+		    [ Store(suspend_time, Float 0.0);
+		      Store(mark_time, Float 0.0);
 		      Store(sweep_time, Float 0.0);
 		      f ]) in
 	     let f =
@@ -1323,12 +1823,11 @@ and def vars = function
 	     let state, _ =
 	       expr vars state
 		 (Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
-	     let state, _ = expr vars state (Apply(Var "gc", [Unit])) in
-	     let t2 = Llvalue(state#time, `Float) in
 	     let state, _ =
 	       expr vars state
-		 (Printf("%gs total; %gs mark; %gs sweep\n",
-			 [ t2 -: t1;
+		 (Printf("%gs total; %gs suspend; %gs mark; %gs sweep\n",
+			 [ Time -: start_time;
+			   Load(suspend_time, `Float);
 			   Load(mark_time, `Float);
 			   Load(sweep_time, `Float) ])) in
 	     let _ =
@@ -1341,7 +1840,7 @@ and def vars = function
   | `Extern(_, _, `Struct _) ->
       failwith "Not yet implemented: FFI returning struct"
   | `Extern(f, tys_arg, ty_ret) ->
-      if !debug then
+      if !Options.debug then
 	eprintf "def extern %s\n%!" f;
       let fn =
 	let ty =
@@ -1359,11 +1858,11 @@ and def vars = function
       Llvm_analysis.assert_valid_function llvm_f;
       add_val (f, (llvm_f, `Function ty)) vars
   | `Type(c, ty) ->
-      if !debug then
+      if !Options.debug then
 	eprintf "def type %s\n%!" c;
       (* Define a new type constructor. *)
-      let name = c ^ Type.to_string () ty in
-      if !debug then
+      let name = sprintf "%s<%a>" c Type.to_string ty in
+      if !Options.debug then
 	printf "def `Type %s\n%!" name;
       let llty = define_global name (undef RTType.lltype) m in
       Hashtbl.add types c (llty, ty);
@@ -1408,60 +1907,67 @@ and def_visit_array vars ty =
       let f = sprintf "visit_array_aux<%s>" (Type.to_string () ty) in
       mk_fun vars cc f [ "a", `Array ty;
 			 "i", `Int ] `Unit
-	(If(Var "i" =: Length(Var "a"), Unit,
-	    compound
-	      [ body;
-	        Apply(Var f, [Var "a"; Var "i" +: Int 1]) ])) in
+	(Unsafe
+	   (If(Var "i" =: Length(Var "a"), Unit,
+	       compound
+		 [ body;
+	           Apply(Var f, [Var "a"; Var "i" +: Int 1]) ]))) in
     mk_fun vars cc f [ "a", `Reference ] `Unit
-      (Apply(Llvalue(llvisitaux, `Function([`Array ty; `Int], `Unit)),
-	     [Magic(Var "a", `Array ty); Int 0]))
+      (Unsafe
+	 (Apply(Llvalue(llvisitaux, `Function([`Array ty; `Int], `Unit)),
+		[Magic(Var "a", `Array ty); Int 0])))
 
 (** Define a function to print a boxed value. *)
 and def_print vars name c ty =
   let f = sprintf "print<%s>" name in
-  mk_fun vars cc f ["x", `Reference] `Unit
-    (compound
-       [Printf(c, []);
-	Print(Cast(Var "x", c))])
+  mk_fun ~debug:false vars cc f ["x", `Reference] `Unit
+    (Unsafe
+       (compound
+	  [ Printf(c^"(", []);
+	    Print(Cast(Var "x", c));
+	    Printf(")", []) ]))
 
 (** Define a function to print an array. *)
 and def_print_array vars ty =
   let f = "print_array<" ^ Type.to_string () ty ^ ">" in
   let aux = "print_array_aux<" ^ Type.to_string () ty ^ ">" in
   let aux =
-    mk_fun vars cc aux ["a", `Array ty; "i", `Int] `Unit
-      (compound
-	 [ Print(Get(Var "a", Var "i"));
-	   If(Var "i" <: Length(Var "a") -: Int 1,
-	      compound
-		[ Printf("; ", []);
-		  Apply(Var aux, [Var "a"; Var "i" +: Int 1]) ],
-	      Unit)]) in
-  mk_fun vars cc f ["x", `Reference] `Unit
-    (Let("a", Magic(Var "x", `Array ty),
-	 compound
-	   [ Printf("[|", []);
-	     If(Length(Var "a") =: Int 0, Unit,
-		Apply(Llvalue(aux, `Function([`Array ty; `Int], `Unit)),
-		      [Var "a"; Int 0]));
-	     Printf("|]", [])]))
+    mk_fun ~debug:false vars cc aux ["a", `Array ty; "i", `Int] `Unit
+      (Unsafe
+	 (compound
+	    [ Print(Get(Var "a", Var "i"));
+	      If(Var "i" <: Length(Var "a") -: Int 1,
+		 If(Var "i" =: Int (-1*3),
+		    Printf("; ..", []),
+		    compound
+		      [ Printf("; ", []);
+			Apply(Var aux, [Var "a"; Var "i" +: Int 1]) ]),
+		 Unit)])) in
+  mk_fun ~debug:false vars cc f ["x", `Reference] `Unit
+    (Unsafe
+       (Let("a", Magic(Var "x", `Array ty),
+	    compound
+	      [ Printf("[|", []);
+		If(Length(Var "a") =: Int 0, Unit,
+		   Apply(Llvalue(aux, `Function([`Array ty; `Int], `Unit)),
+			 [Var "a"; Int 0]));
+		Printf("|]", [])])))
 
-(** Create and memoize a reference type. Used to create wrapper reference types
-    for arrays. *)
+(** Create and memoize a reference type. Used to create wrapper reference
+    types. *)
 and mk_type vars ty =
   let name = "Box("^Type.to_string () ty^")" in
-  if !debug then
+  if !Options.debug then
     printf "mk_type %s\n%!" name;
-  try fst(Hashtbl.find types name) with Not_found ->
-    let _ = def vars (`Type(name, ty)) in
-    let llty, _ = find_type name in
-    llty
+  try vars, (name, Hashtbl.find types name) with Not_found ->
+    let vars = def vars (`Type(name, ty)) in
+    vars, (name, find_type name)
 
 (** Create and memoize an array type. *)
 and mk_array_type ty =
-  if !debug then
+  if !Options.debug then
     printf "mk_array_type<%s>\n%!" (Type.to_string () ty);
-  let name = Type.to_string () (`Array ty) in
+  let name = sprintf "mk_array_type<%a>" Type.to_string ty in
   try fst(Hashtbl.find types name) with Not_found ->
     let llty = define_global name (undef RTType.lltype) m in
     Hashtbl.add types name (llty, `Array ty);
@@ -1472,191 +1978,335 @@ and mk_array_type ty =
 
 (** Compile and run code to initialize the contents of a new type. *)
 and init_type name llty llvisit llprint =
-  if !debug then
+  if !Options.debug then
     printf "init_type %s\n%!" name;
 
   let f = sprintf "init_type<%s>" name in
   let vars =
     defun vars CallConv.c f ["", `Int] `Unit
       (fun vars state ->
+	 let state = state#gc false in
 	 let state, _ =
-	   if not !debug then state, (unit, `Unit) else
+	   if not !Options.debug then state, (unit, `Unit) else
 	     expr vars state (Printf(f^"()\n", [])) in
 	 let s =
+	   (* FIXME: LLVM and HLVM failed to pick up on an error here where
+	      llvisit was loaded as a HOF. *)
 	   Struct
-	     [ Llvalue(llvisit, `Function([`Function([`Reference], `Unit);
-					   `Reference], `Unit));
+	     [ Llvalue(llvisit, `Function([`Reference], `Unit));
 	       Llvalue(llprint, `Function([`Reference], `Unit)) ] in
-	 let state, _ = expr vars state (Store(llty, s)) in
+	 let state, _ = expr vars state (Unsafe(Store(llty, s))) in
 	 let state, _ =
-	   if not !debug then state, (unit, `Unit) else
+	   if not !Options.debug then state, (unit, `Unit) else
 	     expr vars state (Printf(f^" end\n", [])) in
 	 return vars state Unit `Unit) in
   let llvm_f, _ = List.assoc f vars.vals in
-  ignore(run_function llvm_f)
+  if !Options.debug then
+    printf "Running init_type %s\n%!" name;
+  ignore(run_function llvm_f);
+  if !Options.debug then
+    printf "Ran init_type %s\n%!" name
 
 (** Create and memoize a function. Used to create visitor functions, print
     functions and array fill functions. *)
-and mk_fun vars cc f args ty_ret body =
-  if !debug then
+and mk_fun ?(debug=true) vars cc f args ty_ret body =
+  let (f, args, ty_ret, body) =
+    (if debug && !Options.debug then trace else (fun x -> x))
+      (f, args, ty_ret, body) in
+  if !Options.debug then
     printf "mk_fun %s\n%!" f;
   try Hashtbl.find functions f with Not_found ->
+    let body = Expr.unroll f args body in
     let vars =
-      def vars (`UnsafeFunction(f, args, ty_ret, body)) in
+      defun vars cc f args ty_ret
+	(fun vars state ->
+	   let state = state#gc false in
+	   return vars state body ty_ret) in
     let llty, _ = find f vars.vals in
     Hashtbl.add functions f llty;
     llty
 
 (** Define a function to fill an array of the given type. *)
 and fill vars ty =
-  let f = sprintf "fill<%a>" Type.to_string ty in
+  (*
+    let llvm_f =
+    mk_fun vars cc f [ "a", `Array ty;
+    "x", ty;
+    "i", `Int ] `Unit
+    (If(Var "i" <: Length(Var "a"),
+    compound
+    [ Set(Var "a", Var "i", Var "x");
+    Apply(Var f, [Var "a"; Var "x"; Var "i" +: Int 1]) ],
+    Unit)) in
+  *)
+  let f = sprintf "Array.fill<%a>" Type.to_string ty in
   let llvm_f =
     mk_fun vars cc f [ "a", `Array ty;
 		       "x", ty;
-		       "i", `Int ] `Unit
-      (If(Var "i" <: Length(Var "a"),
+		       "i", `Int;
+		       "j", `Int ] `Unit
+      (Unsafe
+	 (If(Var "j" -: Var "i" <: Int 2,
+	     If(Var "i" =: Var "j" , Unit,
+		Set(Var "a", Var "i", Var "x")),
+	     Let("m", Var "i" +: (Var "j" -: Var "i") /: Int 2,
+		 compound
+		   [ Apply(Var f, [Var "a"; Var "x"; Var "i"; Var "m"]);
+		     Apply(Var f, [Var "a"; Var "x"; Var "m"; Var "j"]) ])))) in
+  Llvalue(llvm_f, `Function([`Array ty; ty; `Int; `Int], `Unit))
+
+(** Define a function to remove an element from a bag using linear search. *)
+and seq_remove eq ty =
+  let f =
+    sprintf "Seq.remove<%a, %a>"
+      Expr.to_string (eq (Var "x") (Var "y"))
+      Type.to_string ty in
+  let llvm_f =
+    mk_fun vars cc f [ "seq", Seq.ty ty;
+		       "x", ty;
+		       "i", `Int ] (Seq.ty ty)
+      (If(Var "i" =: Seq.count(Var "seq"),
 	  compound
-	    [ Set(Var "a", Var "i", Var "x");
-	      Apply(Var f, [Var "a"; Var "x"; Var "i" +: Int 1]) ],
-	  Unit)) in
-  Llvalue(llvm_f, `Function([`Array ty; ty; `Int], `Unit))
+	    [ Printf("Not found in '"^f^"'\n", []);
+	      Exit(Int 1);
+	      Var "seq" ],
+	  If(eq (Var "x") (Seq.get(Var "seq", Var "i")),
+	     Seq.remove_at(Var "seq", Var "i"),
+	     Apply(Var f, [Var "seq"; Var "x"; Var "i" +: Int 1])))) in
+  Llvalue(llvm_f, `Function([Seq.ty ty; ty; `Int], Seq.ty ty))
 
 (** Dynamically load the runtime and initialize the shadow stack and GC. *)
 let init() =
-  if !debug then
+  (** Turn on TCO in LLVM. *)
+  if !Options.tco then
+    enable_tail_call_opt();
+  if !Options.debug then
     eprintf "init()\n%!";
   let f_name = "init_runtime" in
   let vars' =
     defun vars CallConv.c f_name ["", `Int] `Unit
       (fun vars state ->
-	 let state = state#no_gc in
+	 let state = state#gc false in
 	 let state, _ =
-	   if not !debug then state, (unit, `Unit) else
+	   if not !Options.debug then state, (unit, `Unit) else
 	     expr vars state (Printf("init_runtime()\n", [])) in
 	 let str s =
 	   let str = state#define_global "str" (const_stringz llcontext s) in
 	   state#gep str [int32 0; int 0] in
 	 let libruntime =
-	   state#call CallConv.c lldlopen [str "./libruntime.so"; int 1] in
+	   state#call CallConv.c Extern.dlopen
+	     [str "./libruntime.so"; int 1] in
 	 let state, _ =
 	   let libruntime = state#int_of_ptr libruntime in
 	   expr vars state
-	     (If(Llvalue(libruntime, `Int) =: Int 0,
-		 compound
-		   [Printf("ERROR: libruntime.so not found\n", []);
-		    Exit(Int 1)],
-		 Unit)) in
+	     (Unsafe
+		(If(Llvalue(libruntime, `Int) =: Int 0,
+		    compound
+		      [Printf("ERROR: libruntime.so not found\n", []);
+		       Exit(Int 1)],
+		    Unit))) in
 	 (* FIXME: We should check dlerror in case the required symbols are
 	    not found. *)
-	 state#store llalloc [int 0]
-	   (state#bitcast
-	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_alloc"])
-	      llalloc_ty);
-	 state#store llfree [int 0]
-	   (state#bitcast
-	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_free"])
-	      llfree_ty);
-	 state#store lltime [int 0]
-	   (state#bitcast
-	      (state#call CallConv.c lldlsym [libruntime; str "hlvm_time"])
-	      lltime_ty);
-	 let n = 1 lsl 22 in
+	 let state, _ =
+	   if not !Options.debug then state, (unit, `Unit) else
+	     expr vars state (Printf("Dynamically loading externs...\n", [])) in
+	 let load_fn ll f =
+	   let ptr = state#call CallConv.c Extern.dlsym [libruntime; str f] in
+	   state#store ll#ptr [int 0] (state#bitcast ptr ll#ty) in
+	 Extern.load_fns load_fn;
+	 ignore(state#call CallConv.c (state#load Extern.init#ptr [int 0]) []);
+	 let n = Options.max_depth in
 	 let state, _ =
 	   expr vars state
-	     (compound [ Store(stack, Alloc(Int n, Null));
-			 Store(visit_stack, Alloc(Int n, Null));
-			 Store(allocated, Alloc(Int n, Null)) ]) in
-	 let state, _ =
-	   if not !debug then state, (unit, `Unit) else
-	     expr vars state (Printf("init_runtime end\n", [])) in
+	     (Unsafe
+		(compound [ dPrintf("Storing empty global thread list...\n", []);
+			    ThreadGlobal.store_list(Seq.empty(Int 0));
+			    dPrintf("Registering main thread...\n", []);
+			    Let("thread", ThreadLocal.make,
+				compound
+				  [ dPrintf("%p setting thread local\n", [Var "thread"]);
+				    SetThreadLocal(Var "thread");
+				    dPrintf("%p registering\n", [AddressOf GetThreadLocal]);
+				    ThreadGlobal.store_list
+				      (Seq.push(ThreadGlobal.load_list,
+						Var "thread")) ]);
+			    dPrintf("Creating visit stack...\n", []);
+			    Store(visit_stack, Alloc(Int n, Null));
+			    dPrintf("Creating allocation list...\n", []);
+			    Store(allocated, Alloc(Int n, Null));
+			    dPrintf("Creating allocation list's mutex...\n", []);
+			    Store(allocated_mutex, CreateMutex);
+			    dPrintf("Initializing thread global...\n", []);
+			    ThreadGlobal.init;
+			    dPrintf("init_runtime() ends\n", []) ])) in
 	 return vars state Unit `Unit) in
   let _ =
     let llvm_f, _ = List.assoc f_name vars'.vals in
     run_function llvm_f in
   vars
 
-let gc_enabled = ref true
-
 let boot() : t list =
-  let printf(x, y) =
-    if !debug then Printf(x, y) else Unit in
+  if not !Options.gc_enabled then [] else
+    let printf(x, y) =
+      if !Options.debug then Printf(x, y) else Unit in
 
-  let getMark f = GetMark f in
-  let setMark(f, n) = SetMark(f, n) in
+    let getMark f = GetMark f in
+    let setMark(f, n) = SetMark(f, n) in
 
-  (* If the given reference is non-null and unmarked then mark it and push
-     its child references onto the visit stack. *)
-  let mark_one p =
-    Let("p", p,
-	If(getMark(Var "p") =: Int 1, Unit,
-	   compound
-	     [ setMark(Var "p", 1);
-	       Apply(Visit(Var "p"), [Var "p"]) ])) in
-  
-  [ (* Mark the whole heap: while the visit stack is non-empty, pop a
-       reference and mark it. *)
-    `UnsafeFunction
-      ("gc_mark_all", ["", `Unit], `Unit,
-       Let("n", Load(n_visit, `Int) -: Int 1,
-	   If(Var "n" <: Int 0, Unit,
-	      Let("a", Load(visit_stack, `Array `Reference),
-		  compound
-		    [ Store(n_visit, Var "n");
-		      mark_one(Get(Var "a", Var "n"));
-		      Apply(Var "gc_mark_all", [Unit]) ]))));
+    (* If the given reference is non-null and unmarked then mark it and push
+       its child references onto the visit stack. *)
+    let mark_one p =
+      Let("p", p,
+	  If(getMark(Var "p") =: Int 1, Unit,
+	     compound
+	       [ setMark(Var "p", 1);
+		 Apply(Visit(Var "p"), [Var "p"]) ])) in
     
-    (* Mark all roots on the shadow stack and then mark the whole heap. *)
-    `UnsafeFunction
-      ("gc_mark", ["i", `Int], `Unit,
-       Let("d", Load(stack_depth, `Int),
-	   If(Var "i" =: Var "d", Apply(Var "gc_mark_all", [Unit]),
-	      Let("s", Load(stack, `Array `Reference),
-		  compound
-		    [ Let("p", Get(Var "s", Var "i"),
-			  If(AddressOf(Var "p") =: Int 0, Unit,
-			     mark_one(Var "p")));
-		      Apply(Var "gc_mark", [Var "i" +: Int 1]) ]))));
+    [ `Type("Null", `Unit);
 
-    (* Search the allocated list for unmarked references and free them,
-       shrinking the allocated list if it is non-empty by overwriting the
-       freed reference with the last reference. Reset marked references to
-       unmarked. *)
-    `UnsafeFunction
-      ("gc_sweep", ["i", `Int], `Unit,
-       Let("n", Load(n_allocated, `Int),
-	   If(Var "i" >=: Var "n", Unit,
-	      Let("a", Load(allocated, `Array `Reference),
-		  Let("p", Get(Var "a", Var "i"),
-		      Let("i",
-			  If(getMark(Var "p") =: Int 1,
-			     compound
-			       [ setMark(Var "p", 0);
-				 Var "i" +: Int 1 ],
-			     compound
-			       [ Free(Var "p");
-				 Set(Var "a", Var "i",
-				     Get(Var "a", Var "n" -: Int 1));
-				 Store(n_allocated, Var "n" -: Int 1);
-				 Var "i" ]),
-			  Apply(Var "gc_sweep", [Var "i"])))))));
-    
-    (* Clear, mark and sweep. *)
-    `UnsafeFunction
-      ("gc", ["", `Unit], `Unit,
+      (* Mark the whole heap: while the visit stack is non-empty, pop a
+	 reference and mark it. *)
+      `UnsafeFunction
+	("gc_mark_3", [], `Unit,
+	 Let("n", Load(n_visit, `Int) -: Int 1,
+	     If(Var "n" <: Int 0, Unit,
+		Let("a", Load(visit_stack, `Array `Reference),
+		    compound
+		      [ Store(n_visit, Var "n");
+			mark_one(Get(Var "a", Var "n"));
+			Apply(Var "gc_mark_3", []) ]))));
+      
+      (* Mark all roots on the shadow stack and then mark the whole heap. *)
+      `UnsafeFunction
+	("gc_mark_2", ["stack", Seq.ty `Reference; "i", `Int], `Unit,
+	 Let("n", GetValue(Var "stack", 0),
+	     If(Var "i" =: Var "n", Unit,
+		Let("a", GetValue(Var "stack", 1),
+		    compound
+		      [ Let("p", Get(Var "a", Var "i"),
+			    If(AddressOf(Var "p") =: Int 0, Unit,
+			       mark_one(Var "p")));
+			Apply(Var "gc_mark_2", [Var "stack";
+						Var "i" +: Int 1]) ]))));
+      
+      `UnsafeFunction
+	("gc_mark", ["i", `Int], `Unit,
+	 Let("a", ThreadGlobal.load_list,
+	     If(Var "i" =: Seq.count(Var "a"),
+		Apply(Var "gc_mark_3", []),
+		compound
+		  [ Apply(Var "gc_mark_2",
+			  [ ThreadLocal.stack_of(Seq.get(Var "a", Var "i"));
+			    Int 0 ]);
+		    Apply(Var "gc_mark", [Var "i" +: Int 1]) ])));
+
+      (* Search the allocated list for unmarked references and free them,
+	 shrinking the allocated list if it is non-empty by overwriting the
+	 freed reference with the last reference. Reset marked references to
+	 unmarked. *)
+      `UnsafeFunction
+	("gc_sweep", ["i", `Int], `Unit,
+	 Let("n", Load(n_allocated, `Int),
+	     If(Var "i" >=: Var "n", Unit,
+		Let("a", Load(allocated, `Array `Reference),
+		    Let("p", Get(Var "a", Var "i"),
+			Let("i",
+			    If(getMark(Var "p") =: Int 1,
+			       compound
+				 [ setMark(Var "p", 0);
+				   Var "i" +: Int 1 ],
+			       compound
+				 [ Free(Var "p");
+				   Set(Var "a", Var "i",
+				       Get(Var "a", Var "n" -: Int 1));
+				   Store(n_allocated, Var "n" -: Int 1);
+				   Var "i" ]),
+			    Apply(Var "gc_sweep", [Var "i"])))))));
+      
+      (* Loop until all threads have suspended themselves. *)
+      `UnsafeFunction
+	("gc_suspend_2", ["i", `Int], `Bool,
+	 Let("a", ThreadGlobal.load_list,
+	     If(Var "i" =: Seq.count(Var "a"),
+		Bool true,
+		Let("t", Seq.get(Var "a", Var "i"),
+		    If(ThreadLocal.eq (Var "t") GetThreadLocal,
+		       Apply(Var "gc_suspend_2", [Var "i" +: Int 1]),
+		       If(ThreadLocal.load_state(Var "t") =: Int State.run,
+			  compound
+			    [ dPrintf("%d/%d %p waiting for %p\n", [Var "i"; Seq.count(Var "a"); AddressOf GetThreadLocal; AddressOf(Var "t")]);
+			      Let("", Apply(Var "gc_suspend_2", [Var "i" +: Int 1]),
+				  Bool false) ],
+			  compound
+			    [ dPrintf("%d/%d %p not waiting for %p\n", [Var "i"; Seq.count(Var "a"); AddressOf GetThreadLocal; AddressOf(Var "t")]);
+			      Apply(Var "gc_suspend_2", [Var "i" +: Int 1]) ]))))));
+      
+      `Extern("usleep", [`Int], `Unit);
+
+      (* Loop until all threads have suspended themselves. *)
+      `UnsafeFunction
+	("gc_suspend", [], `Unit,
+	 If(ThreadGlobal.lock_list(Apply(Var "gc_suspend_2", [Int 0])),
+	    Unit,
+	    compound
+	      [ (* Apply(Var "usleep", [Int 1000]); *)
+		Apply(Var "gc_suspend", []) ]));
+
+      (* Clear, mark and sweep. *)
+      `UnsafeFunction
+	("gc", [], `Unit,
        let time t fs =
 	 Let("time", Time,
 	     compound
 	       (fs @
 		  [ printf("Took %gs\n", [Time -: Var "time"]);
 		    Store(t, Load(t, `Float) +: Time -: Var "time") ])) in
-       if not !gc_enabled then compound [] else
+       if not !Options.gc_enabled then compound [] else
 	 compound
-	   [ printf("Stack %d. Visit stack %d. Live %d. GC marking...\n", [Load(stack_depth, `Int);Load(n_visit, `Int);Load(n_allocated, `Int)]);
+	   [
+	     dPrintf("GC started with %d registered threads\n",
+		     [Seq.count(ThreadGlobal.load_list)]);
+	     dPrintf("GC suspending...\n", []);
+	     time suspend_time [ Apply(Var "gc_suspend", []) ];
+	     dPrintf("GC marking...\n", []);
 	     time mark_time [ Apply(Var "gc_mark", [Int 0]) ];
-	     printf("GC sweeping...\n", []);
+	     dPrintf("GC sweeping...\n", []);
 	     time sweep_time [ Apply(Var "gc_sweep", [Int 0]) ];
-	     printf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
-	     Store(quota, Int 256 +: Int 4 *: Load(n_allocated, `Int))]) ]
+	     dPrintf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
+	     Store(quota, Int 1 +: Int 2 *: Load(n_allocated, `Int));
+	     dPrintf("GC finished. Restarting mutators with quota %d.\n", [Load(quota, `Int)]);
+	     ThreadGlobal.lock_state(ThreadGlobal.store_state State.run);
+	   ]);
+
+    (* Wait in a loop until the global thread state reverts back to "run". *)
+    `UnsafeFunction
+      ("spin", [], `Unit,
+       If(ThreadGlobal.lock_state(ThreadGlobal.load_state =: Int State.run),
+	  ThreadLocal.store_state GetThreadLocal State.run,
+	  Apply(Var "spin", [])));
+
+    `UnsafeFunction
+      ("gc_check", [], `Unit,
+       Let("status",
+	   ThreadGlobal.lock_state
+	     (If(ThreadGlobal.load_state =: Int State.run,
+		 If(Load(n_allocated, `Int) <=: Load(quota, `Int),
+		    Int 0,
+		    compound
+		      [ dPrintf("Suspending all other threads %p\n", [AddressOf GetThreadLocal]);
+			ThreadGlobal.store_state State.suspend;
+			Int 1 ]),
+		 Int 2)),
+	   If(Var "status" =: Int 0,
+	      Unit,
+	      If(Var "status" =: Int 1,
+		 Apply(Var "gc", []),
+		 compound
+		   [ dPrintf("%p suspending itself\n", [AddressOf GetThreadLocal]);
+		     ThreadLocal.store_state GetThreadLocal State.suspend;
+		     Apply(Var "spin", []);
+		     ThreadLocal.store_state GetThreadLocal State.run;
+		     dPrintf("%p resuming itself\n", [AddressOf GetThreadLocal]) ])))) ]
 
 (** Bound variables. *)
 let vars = ref vars
@@ -1671,7 +2321,7 @@ let save() =
   let _ =
     defun !vars CallConv.c f_name [] `Unit
       (fun vars state ->
-	 let state = state#no_gc in
+	 let state = state#gc false in
 	 let call llf =
 	   ignore(state#call CallConv.c llf [int 0]) in
 	 List.iter call !eval_functions;
@@ -1681,15 +2331,18 @@ let save() =
 
 let () =
   Array.iter (function
-		| "--debug" -> debug := true
-		| "--compile" -> compile_only := true
-		| "--view-functions" -> view := true
+		| "--debug" -> Options.debug := true
+		| "--compile" -> Options.compile_only := true
+		| "--view-functions" -> Options.view := true
 		| "--no-shadow-stack" ->
 		    printf "Shadow stack and GC disabled.\n%!";
-		    shadow_stack_enabled := false;
-		    gc_enabled := false
+		    Options.shadow_stack_enabled := false;
+		    Options.gc_enabled := false
 		| "--no-gc" ->
 		    printf "GC disabled.\n%!";
-		    gc_enabled := false
+		    Options.gc_enabled := false
+		| "--no-tco" ->
+		    printf "Tail call elimination disabled.\n%!";
+		    Options.tco := false
 		| _ -> ()) Sys.argv;
   vars := List.fold_left def (init()) (boot())

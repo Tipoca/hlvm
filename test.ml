@@ -572,11 +572,13 @@ let gc ns =
 					    Var "i" +: Int 1 ]) ])) ] @
     List.map
     (fun n ->
-       `Expr(Let("a", Alloc(Int q, Struct[Int 0; null_of ty_bkt]),
-		 Let("b", Alloc(Int n, Null),
+       `Expr(Let("a", Alloc(Int q, Struct[Int 0; Alloc(Int 0, Struct[Construct("Int", Int 0); Bool false])]),
+		 Let("b", Alloc(Int n, Construct("Int", Int 0)),
 		     compound
 		       [ Printf("\nHash table benchmark: n=%d\n", [Int n]);
 			 Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
+			 Print(Var "a");
+			 Printf("\n", []);
 			 Apply(Var "loop1", [ Var "a";
 					      Var "b";
 					      Int 0 ]);
@@ -632,22 +634,100 @@ let bubble_sort ns =
 		  Apply(Var "bubble_sort", [Var "a"])) ]))
     ns
 
-(** Insert debug information at the beginning of each function. *)
-let rec trace : Hlvm.t list -> Hlvm.t list = function
-  | `Function(f, args, ty_ret, body)::t ->
-      `Function
-	(f, args, ty_ret,
-	 compound
-	   [Printf(f^" ", []);
-	    Print(Struct(List.map (fun (x, _) -> Var x) args));
-	    Printf("\n", []);
-	    body]) :: trace t
-  | h::t -> h :: trace t
-  | [] -> []
+let threads n =
+  [ `Function("worker", ["id", `Int], `Unit,
+	      Printf("worker id=%d\n", [Var "id"]));
+
+    `Function("mk_thread", ["i", `Int], `Unit,
+	      If(Var "i" =: Int 0, Unit,
+		 compound
+		   [ JoinThread(CreateThread(Var "worker", Var "i"));
+		     Apply(Var "mk_thread", [Var "i" -: Int 1]) ]));
+
+    `Expr
+      (compound
+	 [ Printf("Creating %d threads\n", [Int n]);
+	   Apply(Var "mk_thread", [Int n]) ]) ] @
+
+  [ `Function("worker", ["id", `Int], `Unit,
+	      Printf("worker id=%d\n", [Var "id"]));
+
+    `Function("mk_thread", ["ij", `Struct[`Int; `Int]], `Unit,
+	      Let("i", GetValue(Var "ij", 0),
+		  Let("j", GetValue(Var "ij", 1),
+		      If(Var "i" =: Var "j", Unit,
+			 If(Var "i" +: Int 1 =: Var "j",
+			    Apply(Var "worker", [Var "i"]),
+			    Let("m", Var "i" +: (Var "j" -: Var "i") /: Int 2,
+				Let("thread", CreateThread(Var "mk_thread", Struct[Var "i"; Var "m"]),
+				    compound
+				      [ Apply(Var "mk_thread", [Struct[Var "m"; Var "j"]]);
+					JoinThread(Var "thread") ])))))));
+
+    `Expr
+      (compound
+	 [ Printf("Creating %d threads\n", [Int n]);
+	   Apply(Var "mk_thread", [Struct[Int 0; Int n]]) ]) ] @
+
+    [ `Function
+	("fib", ["n", `Int], `Int,
+	 let n = Var "n" in
+	 If(n >: Int 1,
+	    Apply(Var "fib", [n -: Int 2]) +: Apply(Var "fib", [n -: Int 1]),
+	    n));
+      
+      `Function("worker", ["id", `Int], `Unit,
+		Printf("%d\n", [Apply(Var "fib", [Var "id"])]));
+      
+      `Expr(Let("t1", CreateThread(Var "worker", Int n),
+		Let("t2", CreateThread(Var "worker", Int n),
+		    Let("t3", CreateThread(Var "worker", Int n),
+			Let("t4", CreateThread(Var "worker", Int n),
+			    Let("t5", CreateThread(Var "worker", Int n),
+				Let("t6", CreateThread(Var "worker", Int n),
+				    Let("t7", CreateThread(Var "worker", Int n),
+					Let("t8", CreateThread(Var "worker", Int n),
+					    compound
+					      [ JoinThread(Var "t1");
+						JoinThread(Var "t2");
+						JoinThread(Var "t3");
+						JoinThread(Var "t4");
+						JoinThread(Var "t5");
+						JoinThread(Var "t6");
+						JoinThread(Var "t7");
+						JoinThread(Var "t8") ]))))))))) ] @
+  [ `Function
+      ("worker", ["args", `Struct[`Int; `Array `Int; `Int]], `Unit,
+       Let("m", GetValue(Var "args", 0),
+	   Let("a", GetValue(Var "args", 1),
+	       Let("i", GetValue(Var "args", 2),
+		   compound
+		     [ lockMutex(Var "m");
+		       Set(Var "a", Int 0, Int 1 +: Get(Var "a", Int 0));
+		       UnlockMutex(Var "m");
+		       If(Var "i" =: Int 100000, Unit,
+			  Apply(Var "worker",
+				[Struct[Var "m";
+					Var "a";
+					Var "i" +: Int 1]]))]))));
+
+    `Expr(Let("m", CreateMutex,
+	      Let("a", Alloc(Int 1, Int 0),
+		  compound
+		    [ Printf("fork\n", []);
+		      Let("args", Struct[Var "m"; Var "a"; Int 1],
+			  Let("t1", CreateThread(Var "worker", Var "args"),
+			      Let("t2", CreateThread(Var "worker", Var "args"),
+				  compound
+				    [ JoinThread(Var "t1");
+				      JoinThread(Var "t2") ])));
+		      Printf("join\n", []);
+		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
 
 (** Main program. *)
 let () =
   let defs =
+    threads 10 @
       tco 1000000 @
       tuples @
       trig @
@@ -658,13 +738,10 @@ let () =
       mandelbrot [1; 77] @
       mandelbrot2 [1; 77] @
       fold [1000; 100000000] @
-      list [1000; 3000000] @
-      queens [8;9;10] @
-      gc [1000; 1000000] @
+      queens [8;8;9;10] @
       bubble_sort [100; 100000] @
+      gc [1000; 1000000] @
+      list [1000; 3000000] @
       [] in
-(*
-  let defs = trace defs in
-*)
   List.iter Hlvm.eval defs;
   Hlvm.save()
