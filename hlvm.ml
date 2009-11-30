@@ -5,28 +5,6 @@
     "Building a Virtual Machine with LLVM" from January to March 2009.
 *)
 
-(* FIXME:
-
-   Need to unpack and repack all struct arguments across function boundaries in
-   order to avoid the bug with TCO.
-
-   Code allows arbitrary code to be injected into the compilation process.
-
-   Allocating null array should use null mark state.
-
-   Dereferencing type etc. must check for NULL, e.g. visit and print.
-
-
-With undef i8*
- add([|(0, [||])|], Int(-1))
-append([||], (Int(-1), false))
-Tail call from append to aux([||], [|(Int(-1), false)|], 0, (Int(-1), false))
-aux return [|(Int(-1), false)|]
-==30698== Invalid read of size 4
-==30698==    at 0x804CD90: ??? (in /home/jdh30/Programs/mine/ocaml/hlvm/hlvm/aout)
-==30698==  Address 0x6d is not stack'd, malloc'd or (recently) free'd
-*)
-
 open Printf
 open Llvm
 open Llvm_executionengine

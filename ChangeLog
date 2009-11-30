@@ -1,3 +1,29 @@
+Mon Nov 30 01:14:49 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
+
+	* First working version of threads and stop-the-world GC. Only took 5
+	days to implement!
+	* Global list of active threads and GC state (running or stopping the
+	world).
+	* Thread local state keeps thread state (running or suspended) and
+	shadow stack.
+	* First thread to hit allocation quota starts a GC by suspending all
+	other threads and performing the same mark+sweep algorithm, albeit
+	using all shadow stacks, before resuming all other threads. The other
+	threads spin while the GC is running.
+	* Currently, every function checks the global state on entry to see if
+	it needs to suspend itself. This is contention for the same lock from
+	every function call on every thread which is very wasteful and is the
+	main reason why HLVM is now 3x slower than it was. However, it is
+	easily remedied by removing checks from leaf functions (that make no
+	calls) and using a counter or even measuring elapsed real time to
+	check less often in non-leaf functions.
+	* Only non-trivial threading aspect is to enter and leave blocking
+	sections when users perform blocking operations like taking out locks
+	of their own. This ensures that one thread cannot start a GC cycle with
+	a lock taken out while another thread is waiting on that lock, which
+	would deadlock all threads.
+
+
 Thu Nov 12 18:08:41 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* Time spent in mark and sweep phases is accumulated per expression
