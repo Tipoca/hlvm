@@ -11,7 +11,8 @@ HLVM currently sports the following features:
 . Tail call elimination of all tail calls.
 . Generic printing.
 . Foreign function interface to call C directly.
-. Mark and sweep garbage collector.
+. POSIX threads.
+. Mark and sweep garbage collector that allows threads to run in parallel.
 . Incremental JIT compilation to high-performance native code suitable for a REPL.
 
 
@@ -19,7 +20,6 @@ HLVM aspires to provide the following features in the future:
 
 . Closures.
 . Parametric polymorphism.
-. Parallel threads.
 . Global variables.
 . Generic comparison, equality, hashing and serialization functions.
 . A standard library.

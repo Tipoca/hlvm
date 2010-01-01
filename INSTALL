@@ -45,8 +45,20 @@ $ ./hlvm --view-functions
 Run-time options
 ----------------
 
-The GC may be disabled by passing the --no-gc command line option. The GC and shadow
-stack may be disabled by passing the --no-shadow-stack command line option.
+--compile         Just compile the generated code and don't run it.
+
+--debug           Print verbose debug information both as HLVM is generating
+                  code and injecting trace print statements into the generated
+                  code to print debug information as the compiled program
+                  runs.
+
+--no-gc           Disable GC cycles but maintain the shadow stack.
+
+--no-shadow-stack Disable both the shadow stack and GC.
+
+--no-tco          Disable the elimination of tail calls by LLVM.
+
+--view-functions  Visualize functions as HLVM generates them.
 
 
 Standalone compilation and optimization
@@ -57,19 +69,10 @@ optimized standalone executable with:
 
 $ ./opt.sh
 
-The resulting aoutopt executable demonstrates what LLVM's IR optimization passes can accomplish. In this case, we find that the performance improvement is very small because HLVM already generates efficient LLVM IR.
+The resulting aout executable is the result of standalone compilation to
+native code.
 
-
-Interactive REPL
-----------------
-
-HLVM now includes a toy front-end in the form of an interactive calculator that JIT compiles expressions through HLVM in order to evaluate them. For example:
-
-$ ./toplevel
-> 1+2*3
-- : `Int = 7
-Live: 0
-Took 0.079003s
+The aoutopt executable demonstrates what LLVM's IR optimization passes can accomplish. In this case, we find that the performance improvement is very small because HLVM already generates efficient LLVM IR.
 
 
 -- Jon Harrop <jon@ffconsultancy.com>

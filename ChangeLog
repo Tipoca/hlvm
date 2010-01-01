@@ -1,3 +1,13 @@
+Fri Jan  1 20:57:09 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Optimized thread-local data to be passed by pointer in function
+	arguments, dramatically improving performance.
+	* Removed some concurrency bugs in the GC.
+	* Altered the parallel n-queens test to recursively spawn child
+	threads.
+	* Implemented ptr->size map in runtime.cpp to check for double frees
+	when runtime is in debugging mode.
+
 Mon Nov 30 01:14:49 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 
 	* First working version of threads and stop-the-world GC. Only took 5

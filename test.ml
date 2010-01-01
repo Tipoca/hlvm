@@ -79,9 +79,11 @@ let sieve is : Hlvm.t list =
 		   [ Printf("\nSieve of Eratosthenes\n", []);
                      Apply(Var "fill", [Var "a"; Bool true; Int 0]);
 		     Apply(Var "loop1", [Var "a"; Int 2]);
-		     Apply(Var "last", [Var "a"; Length(Var "a") -: Int 1]) ])))
+		     Apply(Var "last",
+			   [Var "a"; Length(Var "a") -: Int 1]) ])))
     is
 
+(** Render the Mandelbrot set with inlined complex arithmetic. *)
 let mandelbrot ns : Hlvm.t list =
   [ `Function
       ("pixel", ["n", `Int;
@@ -125,6 +127,8 @@ let mandelbrot ns : Hlvm.t list =
               Apply(Var "col", [Int 0; Int n]) ]))
     ns
 
+(** Render the Mandelbrot set without inlined arithmetic operations on complex
+    numbers as structs. *)
 let mandelbrot2 ns : Hlvm.t list =
   let complex = `Struct[`Float; `Float] in
   let re z = GetValue(Var z, 0) in
@@ -177,6 +181,9 @@ let mandelbrot2 ns : Hlvm.t list =
               Apply(Var "col", [Int 0; Int n]) ]))
     ns
 
+(** Test tail call elimination by passing one function as an argument to
+    another higher-order function that calls it in tail position, mutually
+    recursively. *)
 let tco n : Hlvm.t list =
   [ `Function("even", ["odd", `Function([`Int], `Int); "n", `Int], `Int,
               Apply(Var "odd", [Var "n" +: Int 1]));
@@ -188,9 +195,10 @@ let tco n : Hlvm.t list =
 
     `Expr
       (compound
-         [ Printf("\nTesting tail call elimination across a higher-order function\n", []);
+         [ Printf("\nTesting TCO across a higher-order function\n", []);
            Apply(Var "even", [Var "odd"; Int 0]) ])]
 
+(** Test HLVM's struct representation of tuples. *)
 let tuples : Hlvm.t list =
   [ `Function("id", ["s", `Struct[`Float; `Int]], `Struct[`Float; `Int],
 	      Var "s");
@@ -207,6 +215,7 @@ let tuples : Hlvm.t list =
          [ Printf("\nTesting structs (should give (3.4, 2))\n", []);
            Apply(Var "rev", [Struct[Int 2; Float 3.4]]) ]) ]
 
+(** Test the FFI by calling some trig functions from libc. *)
 let trig : Hlvm.t list =
   let triple = `Struct[`Float; `Float; `Float] in
   [ `Extern("sin", [`Float], `Float);
@@ -224,31 +233,26 @@ let trig : Hlvm.t list =
            Print(Apply(Var "test", [Var "sin"]));
 	   Print(Apply(Var "test", [Var "cos"])) ]) ]
 
-(*
-  OCaml: 4.53s recursive
-  OCaml: 3.63s loop
-  HLVM:  3.35s
-  HLVM:  2.42s substitute "f"
-  HLVM:  2.29s fully inlined and reduced fold
-*)
+(** Create and fold over a large array. *)
 let fold ns : Hlvm.t list =
   let fold ty1 ty2 =
-    [ `Function("fold_aux", ["n", `Int;
+    [ `Function("Array.fold_aux", ["n", `Int;
 			     "f", `Function([ty1; ty2], ty1);
 			     "y", ty1;
 			     "xs", `Array ty2], ty1,
 		If(Var "n" <: Length(Var "xs"),
-		   Apply(Var "fold_aux",
+		   Apply(Var "Array.fold_aux",
 			 [Var "n" +: Int 1;
 			  Var "f";
 			  Apply(Var "f", [Var "y"; Get(Var "xs", Var "n")]);
 			  Var "xs"]),
 		   Var "y"));
 
-      `Function("fold", ["f", `Function([ty1; ty2], ty1);
-			 "y", ty1;
-			 "xs", `Array ty2], ty1,
-		Apply(Var "fold_aux", [Int 0; Var "f"; Var "y"; Var "xs"])) ]
+      `Function("Array.fold", ["f", `Function([ty1; ty2], ty1);
+			       "y", ty1;
+			       "xs", `Array ty2], ty1,
+		Apply(Var "Array.fold_aux",
+		      [Int 0; Var "f"; Var "y"; Var "xs"])) ]
   in
 
   fold (`Struct[`Float; `Float]) `Float @
@@ -263,8 +267,8 @@ let fold ns : Hlvm.t list =
        `Expr
 	 (Let("xs", Alloc(Int n, Float 1.0),
 	      compound
-		[ Printf("\nArray.fold over %d elements with tuple accumulator\n", [Int n]);
-		  Apply(Var "fold",
+		[ Printf("\nArray.fold over %d elements\n", [Int n]);
+		  Apply(Var "Array.fold",
 			[Var "f"; Struct[Float 0.; Float 0.]; Var "xs"]) ])))
     ns
 
@@ -276,7 +280,7 @@ let ty_list ty =
 let nil = Construct("Nil", Unit)
 let cons h t = Construct("Cons", Struct[h; t])
 
-(* Pattern match over empty or non-empty list. *)
+(** Pattern match over empty or non-empty list. *)
 let cond_list list h t k_nil k_cons =
   If(IsType(Var list, "Nil"), k_nil,
      Let(h^t, Cast(Var list, "Cons"),
@@ -284,46 +288,52 @@ let cond_list list h t k_nil k_cons =
 	     Let(t, GetValue(Var (h^t), 1),
 		 k_cons))))
 
+(** Polymorphic List.fold_left in HLVM. *)
 let list_fold_left a b =
-  `Function("fold_left", ["f", `Function([a; b], a);
-			  "x", a;
-			  "list", `Reference], a,
+  `Function("List.fold_left", ["f", `Function([a; b], a);
+			       "x", a;
+			       "list", `Reference], a,
 	    cond_list "list" "h" "t"
 	      (Var "x")
-	      (Apply(Var "fold_left",
+	      (Apply(Var "List.fold_left",
 		     [Var "f";
 		      Apply(Var "f", [Var "x"; Var "h"]);
 		      Var "t"])))
 
+(** Initialize and fold over a long linked list. *)
+(* Not practically relevant but interesting for comparison with OCaml. *)
 let list ns : Hlvm.t list =
   ty_list `Int @
     [ `Function("add", ["n", `Int; "m", `Int], `Int, Var "n" +: Var "m");
       
-      `Function("init", ["t", `Reference; "n", `Int], `Reference,
+      `Function("List.init", ["t", `Reference; "n", `Int], `Reference,
 		Let("t", cons (Var "n") (Var "t"),
 		    If(Var "n" =: Int 0, Var "t",
-		       Apply(Var "init", [Var "t"; Var "n" -: Int 1]))));
+		       Apply(Var "List.init", [Var "t"; Var "n" -: Int 1]))));
       
       list_fold_left `Int `Int;
       
-      `Expr(Apply(Var "init", [nil; Int 10])) ] @
+      `Expr(Apply(Var "List.init", [nil; Int 10])) ] @
     List.map
     (fun n ->
        `Expr
 	 (compound
 	    [ Printf("\nList.init and fold over %d elements\n", [Int n]);
-	      Let("list", Apply(Var "init", [nil; Int n]),
-		  Apply(Var "fold_left", [Var "add"; Int 0; Var "list"])) ]))
+	      Let("list", Apply(Var "List.init", [nil; Int n]),
+		  Apply(Var "List.fold_left",
+			[Var "add"; Int 0; Var "list"])) ]))
     ns
        
 (** Type of a closure. *)
-let ty_closure(ty1, ty2) =
-  `Struct[`Function([`Reference; ty1], ty2); `Reference]
+let ty_closure ty_env (ty1, ty2) =
+  `Struct[`Function([ty_env; ty1], ty2); ty_env]
 
 (** Apply a closure. *)
 let apply(f, x) =
   Apply(GetValue(f, 0), [GetValue(f, 1); x])
 
+(** Test curried function application with a uniform representation of closure
+    environments. *)
 let curry : Hlvm.t list =
   let ty_ret = `Struct[`Int; `Float] in
   [ `Function("f_uncurried", ["x", `Int; "y", `Float], ty_ret,
@@ -334,7 +344,7 @@ let curry : Hlvm.t list =
     `Function("f_apply_2", ["env", `Reference; "y", `Float], ty_ret,
 	      Apply(Var "f_uncurried", [Cast(Var "env", "Int"); Var "y"]));
 
-    `Function("f_apply_1", ["x", `Int], ty_closure(`Float, ty_ret),
+    `Function("f_apply_1", ["x", `Int], ty_closure `Reference (`Float, ty_ret),
 	      Struct[Var "f_apply_2"; Construct("Int", Var "x")]);
 
     `Expr
@@ -344,8 +354,8 @@ let curry : Hlvm.t list =
 	       Struct[apply(Var "g", Float 2.3);
 		      apply(Var "g", Float 3.4)]) ]) ]
      
-let list_filter ty : Hlvm.t =
-  `Function("filter", ["pred", ty_closure(ty, `Bool);
+let list_filter ty_env ty : Hlvm.t =
+  `Function("filter", ["pred", ty_closure ty_env (ty, `Bool);
 		       "list", `Reference], `Reference,
 	    cond_list "list" "h" "t"
 	      (Var "list")
@@ -360,19 +370,13 @@ let list_length ty : Hlvm.t =
 	      (Int 0)
 	      (Int 1 +: Apply(Var "length", [Var "t"])))
 
+(** Solve the n-queens problem using linked lists. *)
 let queens ns =
   let x1 = Var "x1" and x2 = Var "x2" and y1 = Var "y1" and y2 = Var "y2" in
   let ty_pos = `Struct[`Int; `Int] in
   let rec init n f = if n=0 then [] else f(n-1) :: init (n-1) f in
-  let ps n = List.flatten (init n (fun i -> init n (fun j -> i, j))) in
-  let rec expr_of_list = function
-    | [] -> nil
-    | (i, j)::t -> cons (Struct[Int i; Int j]) (expr_of_list t) in
-  let ps n = expr_of_list(ps n) in
   ty_list ty_pos @
-    [ list_filter ty_pos;
-
-      list_length ty_pos;
+    [ list_length ty_pos;
 
       `Function("safe", ["p1", ty_pos; "p2", ty_pos], `Bool,
 		Let("x1", GetValue(Var "p1", 0),
@@ -384,13 +388,19 @@ let queens ns =
 				  (x2 -: x1 <>: y2 -: y1) &&:
 				  (x1 -: y2 <>: x2 -: y1))))));
 
+(* This implementation boxes the closure's environment but that is actually
+   unnecessary in HLVM.
+
       `Type("IntInt", ty_pos);
+
+      list_filter `Reference ty_pos;
 
       `Function("safe_2", ["env", `Reference; "p2", ty_pos], `Bool,
 		Let("p1", Cast(Var "env", "IntInt"),
 		    Apply(Var "safe", [Var "p1"; Var "p2"])));
 
-      `Function("safe_1", ["p1", ty_pos], ty_closure(ty_pos, `Bool),
+      `Function("safe_1", ["p1", ty_pos],
+                ty_closure `Reference (ty_pos, `Bool),
 		Struct[Var "safe_2"; Construct("IntInt", Var "p1")]);
 
       `Function("search", ["f", `Function([`Reference; `Int], `Int);
@@ -415,6 +425,45 @@ let queens ns =
 				 Var "qs";
 				 Var "ps";
 				 Var "accu"])])));
+*)
+
+      list_filter ty_pos ty_pos;
+
+      `Function("safe_1", ["p1", ty_pos], ty_closure ty_pos (ty_pos, `Bool),
+		Struct[Var "safe"; Var "p1"]);
+
+      `Function("search", ["f", `Function([`Reference; `Int], `Int);
+			   "n", `Int;
+			   "qs", `Reference;
+			   "ps", `Reference;
+			   "accu", `Int], `Int,
+		cond_list "ps" "q" "ps"
+		  (If(Apply(Var "length", [Var "qs"]) =: Var "n",
+		      Apply(Var "f", [Var "qs"; Var "accu"]),
+		      Var "accu"))
+		  (Apply(Var "search",
+			 [Var "f";
+			  Var "n";
+			  cons (Var "q") (Var "qs");
+			  Apply(Var "filter",
+				[Apply(Var "safe_1", [Var "q"]);
+				 Var "ps"]);
+			  Apply(Var "search",
+				[Var "f";
+				 Var "n";
+				 Var "qs";
+				 Var "ps";
+				 Var "accu"])])));
+
+      `Function("ps", [ "n", `Int;
+			"i", `Int;
+			"j", `Int ], `Reference,
+		If(Var "i" =: Var "n",
+		   If(Var "j" =: Var "n" -: Int 1,
+		      nil,
+		      Apply(Var "ps", [Var "n"; Int 0; Var "j" +: Int 1])),
+		   cons (Struct[Var "i"; Var "j"])
+		     (Apply(Var "ps", [Var "n"; Var "i" +: Int 1; Var "j"]))));
 
       `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1)] @
     List.map
@@ -422,9 +471,15 @@ let queens ns =
        `Expr
 	 (compound
 	    [ Printf("\nSolve %d-queens problem using lists\n", [Int n]);
-	      Apply(Var "search", [Var "f"; Int n; nil; ps n; Int 0]) ]))
+	      Apply(Var "search",
+		    [Var "f";
+		     Int n;
+		     nil;
+		     Apply(Var "ps", [Int n; Int 0; Int 0]);
+		     Int 0]) ]))
     ns
 
+(** Hash table benchmark derived from HLVM's original GC. *)
 let gc ns =
   let append ty =
     [ `Function("aux", ["a", `Array ty;
@@ -572,17 +627,22 @@ let gc ns =
 					    Var "i" +: Int 1 ]) ])) ] @
     List.map
     (fun n ->
-       `Expr(Let("a", Alloc(Int q, Struct[Int 0; Alloc(Int 0, Struct[Construct("Int", Int 0); Bool false])]),
+       `Expr(Let("a", Alloc(Int q, Struct[Int 0;
+					  Alloc(Int 0,
+						Struct[Construct("Int", Int 0);
+						       Bool false])]),
 		 Let("b", Alloc(Int n, Construct("Int", Int 0)),
 		     compound
 		       [ Printf("\nHash table benchmark: n=%d\n", [Int n]);
-			 Apply(Var "add", [Var "a"; Construct("Int", Int(-1))]);
+			 Apply(Var "add",
+			       [Var "a"; Construct("Int", Int(-1))]);
 			 Print(Var "a");
 			 Printf("\n", []);
 			 Apply(Var "loop1", [ Var "a";
 					      Var "b";
 					      Int 0 ]);
-			 Apply(Var "add", [Var "a"; Construct("Int", Int(-2))]);
+			 Apply(Var "add",
+			       [Var "a"; Construct("Int", Int(-2))]);
 			 Apply(Var "clear", [ Var "a"; Int 0 ]);
 			 Apply(Var "loop2", [ Var "a";
 					      Var "b";
@@ -591,6 +651,7 @@ let gc ns =
 		       ]))))
     ns
 
+(** Bubble sort floating point numbers. *)
 let bubble_sort ns =
   let ty = `Float in
   [ `Function
@@ -600,9 +661,9 @@ let bubble_sort ns =
               Let("aj1", Get(Var "a", Var "j" +: Int 1),
                   compound
                     [ If(Var "aj0" >=: Var "aj1", Unit,
-                        compound
-                          [ Set(Var "a", Var "j", Var "aj1");
-                            Set(Var "a", Var "j" +: Int 1, Var "aj0") ]);
+                         compound
+                           [ Set(Var "a", Var "j", Var "aj1");
+                             Set(Var "a", Var "j" +: Int 1, Var "aj0") ]);
                       Apply(Var "bubble_sort_loop2",
                             [Var "a"; Var "i"; Var "j" +: Int 1]) ]))));
 
@@ -623,79 +684,57 @@ let bubble_sort ns =
       ("init", ["a", `Array ty; "i", `Int], `Array ty,
        If(Var "i" =: Length(Var "a"), Var "a",
           compound
-            [ Set(Var "a", Var "i", Apply(Var "sin", [Float 3.0 *: (FloatOfInt(Var "i") /: FloatOfInt(Length(Var "a")))]));
+            [ Set(Var "a", Var "i",
+		  Apply(Var "sin",
+			[Float 3.0 *: (FloatOfInt(Var "i") /:
+					 FloatOfInt(Length(Var "a")))]));
               Apply(Var "init", [Var "a"; Var "i" +: Int 1]) ])) ] @
     List.map
     (fun n ->
        `Expr
 	 (compound
 	    [ Printf("\nBubble sort benchmark: n=%d\n", [Int n]);
-	      Let("a", Apply(Var "init", [Alloc(Int 10000, Float 0.0); Int 0]),
-		  Apply(Var "bubble_sort", [Var "a"])) ]))
+	      Apply(Var "bubble_sort",
+		    [Apply(Var "init", [Alloc(Int n, Float 0.0); Int 0])]) ]))
     ns
 
+(** Solve the 8-queens problems "n" times in parallel. *)
 let threads n =
-  [ `Function("worker", ["id", `Int], `Unit,
-	      Printf("worker id=%d\n", [Var "id"]));
-
-    `Function("mk_thread", ["i", `Int], `Unit,
-	      If(Var "i" =: Int 0, Unit,
-		 compound
-		   [ JoinThread(CreateThread(Var "worker", Var "i"));
-		     Apply(Var "mk_thread", [Var "i" -: Int 1]) ]));
+  [ `Function
+      ("worker", ["id", `Int], `Unit,
+	 let n = 8 in
+	 compound
+	   [ Printf("Queens\n", []);
+	     Printf("%d\n", [Apply(Var "search",
+				   [Var "f";
+				    Int n;
+				    nil;
+				    Apply(Var "ps", [Int n; Int 0; Int 0]);
+				    Int 0])]) ]);
+    
+    `Function
+      ("mk_thread", ["ij", `Struct[`Int; `Int]], `Unit,
+       Let("i", GetValue(Var "ij", 0),
+	   Let("j", GetValue(Var "ij", 1),
+	       If(Var "i" =: Var "j", Unit,
+		  If(Var "i" +: Int 1 =: Var "j",
+		     Apply(Var "worker", [Int n]),
+		     Let("m", Var "i" +: (Var "j" -: Var "i") /: Int 2,
+			 Let("thread",
+			     CreateThread(Var "mk_thread",
+					  Struct[Var "m"; Var "j"]),
+			     compound
+			       [ Apply(Var "mk_thread",
+				       [Struct[Var "i"; Var "m"]]);
+				 JoinThread(Var "thread") ])))))));
 
     `Expr
       (compound
-	 [ Printf("Creating %d threads\n", [Int n]);
-	   Apply(Var "mk_thread", [Int n]) ]) ] @
+	 [ Printf("%dx %d-queens\n", [Int n; Int 8]);
+	   Apply(Var "mk_thread", [Struct[Int 0; Int n]]) ]) ]
 
-  [ `Function("worker", ["id", `Int], `Unit,
-	      Printf("worker id=%d\n", [Var "id"]));
-
-    `Function("mk_thread", ["ij", `Struct[`Int; `Int]], `Unit,
-	      Let("i", GetValue(Var "ij", 0),
-		  Let("j", GetValue(Var "ij", 1),
-		      If(Var "i" =: Var "j", Unit,
-			 If(Var "i" +: Int 1 =: Var "j",
-			    Apply(Var "worker", [Var "i"]),
-			    Let("m", Var "i" +: (Var "j" -: Var "i") /: Int 2,
-				Let("thread", CreateThread(Var "mk_thread", Struct[Var "i"; Var "m"]),
-				    compound
-				      [ Apply(Var "mk_thread", [Struct[Var "m"; Var "j"]]);
-					JoinThread(Var "thread") ])))))));
-
-    `Expr
-      (compound
-	 [ Printf("Creating %d threads\n", [Int n]);
-	   Apply(Var "mk_thread", [Struct[Int 0; Int n]]) ]) ] @
-
-    [ `Function
-	("fib", ["n", `Int], `Int,
-	 let n = Var "n" in
-	 If(n >: Int 1,
-	    Apply(Var "fib", [n -: Int 2]) +: Apply(Var "fib", [n -: Int 1]),
-	    n));
-      
-      `Function("worker", ["id", `Int], `Unit,
-		Printf("%d\n", [Apply(Var "fib", [Var "id"])]));
-      
-      `Expr(Let("t1", CreateThread(Var "worker", Int n),
-		Let("t2", CreateThread(Var "worker", Int n),
-		    Let("t3", CreateThread(Var "worker", Int n),
-			Let("t4", CreateThread(Var "worker", Int n),
-			    Let("t5", CreateThread(Var "worker", Int n),
-				Let("t6", CreateThread(Var "worker", Int n),
-				    Let("t7", CreateThread(Var "worker", Int n),
-					Let("t8", CreateThread(Var "worker", Int n),
-					    compound
-					      [ JoinThread(Var "t1");
-						JoinThread(Var "t2");
-						JoinThread(Var "t3");
-						JoinThread(Var "t4");
-						JoinThread(Var "t5");
-						JoinThread(Var "t6");
-						JoinThread(Var "t7");
-						JoinThread(Var "t8") ]))))))))) ] @
+(** Increment an atomic counter from two threads simultaneously. *)
+let atomic =
   [ `Function
       ("worker", ["args", `Struct[`Int; `Array `Int; `Int]], `Unit,
        Let("m", GetValue(Var "args", 0),
@@ -714,21 +753,21 @@ let threads n =
     `Expr(Let("m", CreateMutex,
 	      Let("a", Alloc(Int 1, Int 0),
 		  compound
-		    [ Printf("fork\n", []);
+		    [ Printf("Incrementing atomic counter\n", []);
 		      Let("args", Struct[Var "m"; Var "a"; Int 1],
 			  Let("t1", CreateThread(Var "worker", Var "args"),
 			      Let("t2", CreateThread(Var "worker", Var "args"),
 				  compound
 				    [ JoinThread(Var "t1");
 				      JoinThread(Var "t2") ])));
-		      Printf("join\n", []);
 		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
 
 (** Main program. *)
 let () =
   let defs =
-    threads 10 @
-      tco 1000000 @
+    queens [] @
+      threads 8 @
+      tco 100000000 @
       tuples @
       trig @
       curry @
@@ -739,7 +778,7 @@ let () =
       mandelbrot2 [1; 77] @
       fold [1000; 100000000] @
       queens [8;8;9;10] @
-      bubble_sort [100; 100000] @
+      bubble_sort [100; 10000] @
       gc [1000; 1000000] @
       list [1000; 3000000] @
       [] in
