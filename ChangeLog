@@ -4,6 +4,7 @@ Mon Jan  4 07:49:18 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 	* Changed the value "unit" to an undef rather than "int 0".
 	* Fixed unnecessary allocation of mark state for empty (NULL) arrays:
 	parallel n-queens is ~3% faster.
+	* Fixed the calculator example.
 
 
 Fri Jan  1 20:57:09 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
