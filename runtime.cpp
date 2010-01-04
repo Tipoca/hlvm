@@ -93,7 +93,7 @@ extern "C" {
     if (debug)
       printf("hlvm_join_thread(%p)\n", thread);
     pthread_join(*thread, NULL);
-    free(thread);
+    hlvm_free(thread);
     if (debug)
       printf("hlvm_join_thread(%p) done\n", thread);
   }

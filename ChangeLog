@@ -1,3 +1,11 @@
+Mon Jan  4 07:49:18 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Inlined get_stack.
+	* Changed the value "unit" to an undef rather than "int 0".
+	* Fixed unnecessary allocation of mark state for empty (NULL) arrays:
+	parallel n-queens is ~3% faster.
+
+
 Fri Jan  1 20:57:09 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 
 	* Optimized thread-local data to be passed by pointer in function
@@ -7,6 +15,7 @@ Fri Jan  1 20:57:09 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 	threads.
 	* Implemented ptr->size map in runtime.cpp to check for double frees
 	when runtime is in debugging mode.
+
 
 Mon Nov 30 01:14:49 GMT 2009  Jon Harrop <jon@ffconsultancy.com>
 

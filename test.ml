@@ -761,7 +761,68 @@ let atomic =
 				    [ JoinThread(Var "t1");
 				      JoinThread(Var "t2") ])));
 		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
+(*
+(** Render the Mandelbrot set with inlined complex arithmetic. *)
+let parallel_mandelbrot ns : Hlvm.t list =
+  [ `Function
+      ("pixel", ["n", `Int;
+		 "zr", `Float; "zi", `Float;
+		 "cr", `Float; "ci", `Float], `Bool,
+       If(Var "n" =: Int 65536, Bool false,
+	  If(Var "zr" *: Var "zr" +: Var "zi" *: Var "zi" >=: Float 4.0,
+	     Bool true,
+	     Apply(Var "pixel",
+		   [Var "n" +: Int 1;
+		    Var "zr" *: Var "zr" -:
+		      Var "zi" *: Var "zi" +: Var "cr";
+		    Float 2.0 *: Var "zr" *: Var "zi" +: Var "ci";
+		    Var "cr"; Var "ci"]))));
+    
+    `Function
+      ("row", ["a", `Array `Bool; "i", `Int; "j", `Int; "n", `Int], `Unit,
+       If(Var "i" >: Var "n", Unit,
+	  compound
+	    [ Set(Var "a", Var "i",
+		  Apply(Var "pixel",
+			[Int 0;
+			 Float 0.0; Float 0.0;
+			 Float 2.0 *: FloatOfInt(Var "i") /:
+			   FloatOfInt(Var "n") -: Float 1.5;
+			 Float 2.0 *: FloatOfInt(Var "j") /:
+			   FloatOfInt(Var "n") -: Float 1.0]));
+	      Apply(Var "row",
+		    [Var "a"; Var "i" +: Int 1; Var "j"; Var "n"])]));
 
+    `Function
+      ("print_row", ["a", `Array `Bool; "i", `Int], `Unit,
+       If(Var "i" =: Length(Var "a"), Unit,
+	  compound
+	    [ If(Get(Var "a", Var "i"), Printf(".", []), Printf(" ", []));
+	      Apply(Var "print_row", [Var "a"; Var "i" +: Int 1]) ]));
+
+    `Function
+      ("col", ["j0", `Int; "j1", `Int], `Unit,
+       If(Var "j0" =: Var "j1", Unit,
+	  If(Var "j0" +: Int 1 =: Var "j1",
+	     Let("a", Alloc(Var "n" +: Int 1, Bool false),
+		 compound
+		   [ Apply(Var "row", [Var "a"; Int 0; Var "j"; Var "n"]);
+		     Apply(Var "print_row", [Var "a"; Int 0]);
+		     Printf("\n", []) ]),
+	     Let("a", Alloc(Var "n" +: Int 1, Bool false),
+		 compound
+		   [ Apply(Var "row", [Var "a"; Int 0; Var "j"; Var "n"]);
+		     Apply(Var "print_row", [Var "a"; Int 0]);
+		     Printf("\n", []);
+		     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]))) ] @
+    List.map
+    (fun n ->
+       `Expr
+	 (compound
+            [ Printf("\nMandelbrot with inline complex arithmetic\n", []);
+              Apply(Var "col", [Int 0; Int(n+1)]) ]))
+    ns
+*)
 (** Main program. *)
 let () =
   let defs =
@@ -781,6 +842,9 @@ let () =
       bubble_sort [100; 10000] @
       gc [1000; 1000000] @
       list [1000; 3000000] @
+(*
+      parallel_mandelbrot [1; 77] @
+*)
       [] in
   List.iter Hlvm.eval defs;
   Hlvm.save()

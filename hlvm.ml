@@ -620,7 +620,7 @@ let print_type_of v =
 let int n = const_int int_type n
 
 (** LLVM value used to represent the value () of the type unit. *)
-let unit = int 0
+let unit = undef int_type
 
 (** Create an LLVM 8-bit int. *)
 let int8 n = const_int i8_type n
@@ -663,9 +663,6 @@ let mp = ModuleProvider.create m
 let ee =
   ignore(Llvm_executionengine.initialize_native_target());
   ExecutionEngine.create_jit mp
-
-let ( <-- ) (x, ty) f =
-  Store(x, f (Load(x, ty)))
 
 (** Type used to represent stacks and unordered sequences (bags). *)
 (* FIXME: Sequences should resize themselves when more space is required
@@ -965,15 +962,6 @@ let get_stack state =
   state#gep data [int 0; int32 3; int32 0],
   state#gep data [int 0; int32 3; int32 1]
 
-(** Restore the shadow stack by resetting its depth to an older value. *)
-let gc_restore state =
-  if !Options.shadow_stack_enabled then begin
-    if !Options.debug then
-      printf "state#restore\n%!";
-    let stack_depth, _ = get_stack state in
-    state#store stack_depth [int 0] state#odepth
-  end
-
 (** Create a state object that encapsulates our interface for emitting LLVM
     instructions. *)
 class state pass_tl func = object (self : 'self)
@@ -1062,7 +1050,12 @@ class state pass_tl func = object (self : 'self)
       was entered. *)
   method gc_restore() =
     if gc_enabled && roots then
-      gc_restore self
+      if !Options.shadow_stack_enabled then begin
+	if !Options.debug then
+	  printf "state#restore\n%!";
+	let stack_depth, _ = get_stack self in
+	self#store stack_depth [int 0] self#odepth
+      end
 
   (** Return a "state" object that will not inject instructions to keep the
       GC informed if false. *)
@@ -1341,8 +1334,9 @@ and expr_aux vars state = function
       let state, (n, ty_n), (x, ty_x) = expr2 vars state n x in
       type_check "Alloc with non-int length" ty_n `Int;
       let data = state#malloc (lltype_of ty_x) n in
-      (* FIXME: We're allocating mark state for NULL arrays. *)
-      let mark = state#malloc i8_type (int 1) in
+      let state, (mark_size, _) =
+	expr vars state (If(Llvalue(n, `Int) =: Int 0, Int 0, Int 1)) in
+      let mark = state#malloc i8_type mark_size in
       let a = Ref.mk state (mk_array_type ty_x) n data mark in
       let ty_a = `Array ty_x in
       let fill = fill vars ty_x in
@@ -2060,8 +2054,6 @@ and init_type name llty llvisit llprint =
 	   if not !Options.debug then state, (unit, `Unit) else
 	     expr vars state (Printf(f^"()\n", [])) in
 	 let s =
-	   (* FIXME: LLVM and HLVM failed to pick up on an error here where
-	      llvisit was loaded as a HOF. *)
 	   Struct
 	     [ Llvalue(llvisit, `Function([`Reference], `Unit));
 	       Llvalue(llprint, `Function([`Reference], `Unit)) ] in
