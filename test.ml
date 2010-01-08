@@ -764,6 +764,9 @@ let atomic =
 		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
 
 let ray file level n : Hlvm.t list =
+  let rec lets = function
+    | [], x -> x
+    | (var, expr)::xs, x -> Let(var, expr, lets(xs, x)) in
   let of_string str =
     let copy i = Set(Var "s", Int i, Byte(Char.code str.[i])) in
     Let("s", Alloc(Int(String.length str + 1), Byte 0),
@@ -781,10 +784,13 @@ let ray file level n : Hlvm.t list =
     GetValue(a, 0) *: GetValue(b, 0) +:
       GetValue(a, 1) *: GetValue(b, 1) +:
       GetValue(a, 2) *: GetValue(b, 2) in
+  let length r =
+    Let("r", r, Apply(Var "sqrt", [dot (Var "r") (Var "r")])) in
   let unitise a =
-    Let("a", a,
-	let a = Var "a" in
-	Float 1.0 /: Apply(Var "sqrt", [dot a a]) *| a) in
+    Let("a", a, Float 1.0 /: length(Var "a") *| Var "a") in
+  let max(a, b) =
+    lets(["a", a; "b", b],
+	 If(Var "a" >=: Var "b", Var "a", Var "b")) in
   let sqr x = Let("x", x, Var "x" *: Var "x") in
   let zero = Struct[Float 0.0; Float 0.0; Float 0.0] in
   let nohit = Struct[Float infinity; zero] in
@@ -794,9 +800,6 @@ let ray file level n : Hlvm.t list =
 	compound
 	  (List.mapi (fun i x -> Set(Var "arr", Int(1+i), x)) xs @
 	     [Var "arr"])) in
-  let rec lets = function
-    | [], x -> x
-    | (var, expr)::xs, x -> Let(var, expr, lets(xs, x)) in
   let vec3 = `Struct[`Float; `Float; `Float] in
   let scene = `Struct[vec3; `Float; `Reference] in
   [ `Extern("sqrt", [`Float], `Float);
@@ -809,8 +812,7 @@ let ray file level n : Hlvm.t list =
     `Type("Group", `Struct[scene; scene; scene; scene; scene]);
 
     `Function
-      ("intersect", [ "o", vec3;
-		      "d", vec3;
+      ("intersect", [ "d", vec3;
 		      "hit", `Struct[`Float; vec3];
 		      "scene", scene ],
        `Struct[`Float; vec3],
@@ -818,102 +820,75 @@ let ray file level n : Hlvm.t list =
 	      "c", GetValue(Var "scene", 0);
 	      "r2", GetValue(Var "scene", 1);
 	      "s", GetValue(Var "scene", 2);
-	      "v", Var "c" -| Var "o";
-              "b", dot (Var "v") (Var "d");
-	      "disc2",
-	      sqr(Var "b") -: dot (Var "v") (Var "v") +: Var "r2" ],
+	      "disc2", dot (Var "c") (Var "c") -: Var "r2" ],
 	    If(Var "disc2" <: Float 0.0, Var "hit",
-	       lets([ "disc", Apply(Var "sqrt", [Var "disc2"]);
-		      "t1", Var "b" -: Var "disc";
-		      "t2", Var "b" +: Var "disc"],
-		    If(Var "t2" >: Float 0.0,
-		       Let("l'", If(Var "t1" >: Float 0.0, Var "t1", Var "t2"),
-			   If(Var "l'" >=: Var "l", Var "hit",
-			      If(IsType(Var "s", "Sphere"),
-				 Struct[ Var "l'";
-					 unitise(Var "o" +|
-						     Var "l'" *| Var "d" -|
-							 Var "c") ],
-				 Let("g", Cast(Var "s", "Group"),
-				     List.fold_left
-				       (fun hit scene ->
-					  Apply(Var "intersect",
-						[Var "o"; Var "d"; hit; scene]))
-				       (Var "hit")
-				       (List.init 5 (fun i -> GetValue(Var "g", i))))))),
-		       Var "hit")))));
-    (*
+	       lets([ "b", dot (Var "c") (Var "d");
+		      "b2", sqr(Var "b") ],
+		    If(Var "b2" <: Var "disc2", Var "hit",
+		       lets([ "disc", Apply(Var "sqrt",
+					    [Var "b2" -: Var "disc2"]);
+			      "t1", Var "b" -: Var "disc" ],
+			    Let("l'", If(Var "t1" >: Float 0.0,
+					 Var "t1",
+					 Var "b" -: Var "disc"),
+				If(Var "l'" >=: Var "l", Var "hit",
+				   If(IsType(Var "s", "Sphere"),
+				      Struct[ Var "l'";
+					      unitise(Var "l'" *| Var "d" -|
+							  Var "c") ],
+				      Let("g", Cast(Var "s", "Group"),
+					  List.fold_left
+					    (fun hit scene ->
+					       Apply(Var "intersect",
+						     [Var "d"; hit; scene]))
+					    (Var "hit")
+					    (List.init 5
+					       (fun i -> GetValue(Var "g", i)))))))))))));
 
     `Function
-      ("intersect", [ "o", vec3;
-		      "d", vec3;
-		      "hit", `Struct[`Float; vec3];
-		      "scene", scene ],
-       `Struct[`Float; vec3],
-       lets([ "l", GetValue(Var "hit", 0);
-	      "c", GetValue(Var "scene", 0);
-	      "r", GetValue(Var "scene", 1);
+      ("intersect'", [ "o", vec3;
+		       "d", vec3;
+		       "scene", scene ],
+       `Bool,
+       lets([ "c", GetValue(Var "scene", 0);
+	      "r2", GetValue(Var "scene", 1);
 	      "s", GetValue(Var "scene", 2);
 	      "v", Var "c" -| Var "o";
               "b", dot (Var "v") (Var "d");
-	      "disc2",
-	      Var "b" *: Var "b" -:
-		dot (Var "v") (Var "v") +:
-		Var "r" *: Var "r";
-	      "l'",
-	      If(Var "disc2" <: Float 0.0, Float infinity,
-		 lets([ "disc", Apply(Var "sqrt", [Var "disc2"]);
-			"t1", Var "b" -: Var "disc";
-			"t2", Var "b" +: Var "disc"],
-			If(Var "t2" >: Float 0.0,
-			   If(Var "t1" >: Float 0.0, Var "t1", Var "t2"),
-			   Float infinity))) ],
-	    If(Var "l'" >=: Var "l", Var "hit",
-	       If(IsType(Var "s", "Sphere"),
-		  Struct[ Var "l'";
-			  unitise(Var "o" +| Var "l'" *| Var "d" -| Var "c") ],
-		  Let("g", Cast(Var "s", "Group"),
-		      List.fold_left
-			(fun hit scene ->
-			   Apply(Var "intersect",
-				 [Var "o"; Var "d"; hit; scene]))
-			(Var "hit")
-			(List.init 5 (fun i -> GetValue(Var "g", i))))))));
+	      "disc2", sqr(Var "b") -: dot (Var "v") (Var "v") +: Var "r2" ],
+	    (Var "disc2" >=: Float 0.0) &&:
+	      (Var "b" +: Apply(Var "sqrt", [Var "disc2"]) >=: Float 0.0) &&:
+	      (IsType(Var "s", "Sphere") ||:
+		 Let("g", Cast(Var "s", "Group"),
+		     Apply(Var "intersect'",
+			   [Var "o"; Var "d"; GetValue(Var "g", 0)]) ||:
+		     Apply(Var "intersect'",
+			   [Var "o"; Var "d"; GetValue(Var "g", 1)]) ||:
+		     Apply(Var "intersect'",
+			   [Var "o"; Var "d"; GetValue(Var "g", 2)]) ||:
+		     Apply(Var "intersect'",
+			   [Var "o"; Var "d"; GetValue(Var "g", 3)]) ||:
+		     Apply(Var "intersect'",
+			   [Var "o"; Var "d"; GetValue(Var "g", 4)])))));
 
-      `Function
-      ("intersect", [ "o", vec3;
-      "d", vec3;
-      "hit", `Struct[`Float; vec3];
-      "scene", scene ],
-      `Struct[`Float; vec3],
-      lets([ "l", GetValue(Var "hit", 0);
-      "c", GetValue(Var "scene", 0);
-      "r", GetValue(Var "scene", 1);
-      "s", GetValue(Var "scene", 2);
-      "v", Var "c" -| Var "o";
-      "disc2", dot (Var "v") (Var "v") -: Var "r" *: Var "r";
-      "l'",
-      If(Var "disc2" <: Float 0.0, Float infinity,
-      lets([ "b", dot (Var "v") (Var "d");
-      "b2", Var "b" *: Var "b" ],
-      If(Var "b2" <: Var "disc2", Float infinity,
-      lets([ "disc", Apply(Var "sqrt",
-      [Var "b2" -: Var "disc2"]);
-      "t1", Var "b" -: Var "disc" ],
-      If(Var "t1" >: Float 0.0, Var "t1",
-      Var "b" +: Var "disc"))))) ],
-      If(Var "l'" >: Var "l", Var "hit",
-      If(IsType(Var "s", "Sphere"),
-      Struct[ Var "l'";
-      unitise(Var "o" +| Var "l'" *| Var "d" -| Var "c") ],
-      Let("g", Cast(Var "s", "Group"),
-      List.fold_left
-      (fun hit scene ->
-      Apply(Var "intersect",
-      [Var "o"; Var "d"; hit; scene]))
-      (Var "hit")
-      (List.init 5 (fun i -> Get(Var "g", Int i))))))));
-    *)
+    `Function
+      ("bound", [ "b", `Struct[vec3; `Float];
+		  "scene", scene ], `Struct[vec3; `Float],
+       lets([ "c'", GetValue(Var "scene", 0);
+	      "r'", GetValue(Var "scene", 1);
+	      "scene", GetValue(Var "scene", 2) ],
+	    If(IsType(Var "scene", "Sphere"),
+	       lets([ "c", GetValue(Var "b", 0);
+		      "r", GetValue(Var "b", 1) ],
+		    Struct[Var "c";
+			   max(Var "r",
+			       length(Var "c" -| Var "c'") +: Var "r'")]),
+	       Let("g", Cast(Var "scene", "Group"),
+		   List.fold_left
+		     (fun bound scene -> Apply(Var "bound", [bound; scene]))
+		     (Var "b")
+		     (List.init 5 (fun i -> GetValue(Var "g", i)))))));
+
     `Function
       ("create", ["level", `Int; "c", vec3; "r", `Float], scene,
        Let("obj", Struct[Var "c"; sqr(Var "r"); Construct("Sphere", Unit)],
@@ -924,31 +899,40 @@ let ray file level n : Hlvm.t list =
 		    Apply(Var "create", [ Var "level" -: Int 1;
 					  Var "c" +| Struct[x'; a; z'];
 					  Float 0.5 *: Var "r" ]) in
-		  Struct[Var "c";
-			 sqr(Float 3.0 *: Var "r");
+		  lets([ "g",
 			 Construct("Group",
 				   Struct[Var "obj";
 					  aux (~-: a) (~-: a);
 					  aux a (~-: a);
 					  aux (~-: a) a;
-					  aux a a])]))));
+					  aux a a]);
+			 "scene",
+			 Struct[Var "c"; sqr(Float 3.0 *: Var "r"); Var "g"] ],
+		       Let("b",
+			   Apply(Var "bound",
+				 [Struct
+				    [Var "c" +|
+					 Struct[Float 0.0; Var "r"; Float 0.0];
+				     Float 0.0];
+				  Var "scene"]),
+			   Struct[GetValue(Var "b", 0);
+				  sqr(GetValue(Var "b", 1));
+				  Var "g"]))))));
 
     `Function
       ("ray_trace", ["scene", scene; "light", vec3; "dir", vec3], `Float,
-       lets([ "ln", Apply(Var "intersect",
-			  [ zero; Var "dir"; nohit; Var "scene" ]);
-	      "l", GetValue(Var "ln", 0);
-	      "n", GetValue(Var "ln", 1);
-	      "g", dot (Var "n") (Var "light")],
-	    If(Var "g" <=: Float 0.0, Float 0.0,
-	       Let("p", Var "l" *| Var "dir" +|
-		       Float(sqrt epsilon_float) *| Var "n",
-		   let hit =
-		     Apply(Var "intersect",
-			   [ Var "p"; Var "light"; nohit; Var "scene" ]) in
-		   If(GetValue(hit, 0) <: Float infinity,
-		      Float 0.0,
-		      Var "g")))));
+       lets([ "ln", Apply(Var "intersect", [ Var "dir"; nohit; Var "scene" ]);
+	      "l", GetValue(Var "ln", 0) ],
+	    If(Var "l" =: Float infinity, Float 0.0,
+	       lets([ "n", GetValue(Var "ln", 1);
+		      "g", dot (Var "n") (Var "light")],
+		    If(Var "g" <=: Float 0.0, Float 0.0,
+		       Let("p", Var "l" *| Var "dir" +|
+			       Float(sqrt epsilon_float) *| Var "n",
+			   let hit =
+			     Apply(Var "intersect'",
+				   [ Var "p"; Var "light"; Var "scene" ]) in
+			   If(hit, Float 0.0, Var "g")))))));
 
     `Function
       ("loop_x", [ "light", vec3;
@@ -1013,7 +997,14 @@ let ray file level n : Hlvm.t list =
     `Expr
       (Let("out", Apply(Var "fopen", [of_string file; of_string "w"]),
 	   compound
-	     [ Apply(Var "fputs", [of_string(sprintf "P5\n%d %d\n255\n" n n);
+	     [ 
+(*
+	       Print(Apply(Var "create",
+			   [Int 3;
+			    Struct[Float 0.0; Float(-1.0); Float 4.0];
+			    Float 1.0]));
+*)
+	       Apply(Var "fputs", [of_string(sprintf "P5\n%d %d\n255\n" n n);
 				   Var "out"]);
 	       Apply(Var "loop_y",
 		     [unitise(Struct[Float 1.0; Float 3.0; Float(-2.0)]);

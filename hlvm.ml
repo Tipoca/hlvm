@@ -1435,7 +1435,7 @@ and expr_aux vars state = function
       let spec = state#gep (mk_string spec) [int32 0; int 0] in
       let state, (args, _) = exprs vars state args in
       let ext x =
-	if type_of x <> float_type then x else
+	if type_of x <> single_type then x else
 	  build_fpext x double_type "" state#bb in
       let args = List.map ext args in
       ignore(state#call CallConv.c Extern.printf (spec::args));
