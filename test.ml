@@ -1,5 +1,6 @@
 (** Test programs for HLVM. *)
 
+open Printf
 open Hlvm
 open Expr
 
@@ -761,6 +762,270 @@ let atomic =
 				    [ JoinThread(Var "t1");
 				      JoinThread(Var "t2") ])));
 		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
+
+let ray file level n : Hlvm.t list =
+  let of_string str =
+    let copy i = Set(Var "s", Int i, Byte(Char.code str.[i])) in
+    Let("s", Alloc(Int(String.length str + 1), Byte 0),
+	compound(List.init (String.length str) copy @
+		   [ AddressOf(Var "s") ])) in
+  let string = `Int in
+  let stream = `Int in
+  let ( *| ) s r =
+    Struct(List.init 3 (fun i -> s *: GetValue(r, i))) in
+  let ( +| ) a b =
+    Struct(List.init 3 (fun i -> GetValue(a, i) +: GetValue(b, i))) in
+  let ( -| ) a b =
+    Struct(List.init 3 (fun i -> GetValue(a, i) -: GetValue(b, i))) in
+  let dot a b =
+    GetValue(a, 0) *: GetValue(b, 0) +:
+      GetValue(a, 1) *: GetValue(b, 1) +:
+      GetValue(a, 2) *: GetValue(b, 2) in
+  let unitise a =
+    Let("a", a,
+	let a = Var "a" in
+	Float 1.0 /: Apply(Var "sqrt", [dot a a]) *| a) in
+  let sqr x = Let("x", x, Var "x" *: Var "x") in
+  let zero = Struct[Float 0.0; Float 0.0; Float 0.0] in
+  let nohit = Struct[Float infinity; zero] in
+  let ss = 4 in
+  let array (x, xs) =
+    Let("arr", Alloc(Int(1 + List.length xs), x),
+	compound
+	  (List.mapi (fun i x -> Set(Var "arr", Int(1+i), x)) xs @
+	     [Var "arr"])) in
+  let rec lets = function
+    | [], x -> x
+    | (var, expr)::xs, x -> Let(var, expr, lets(xs, x)) in
+  let vec3 = `Struct[`Float; `Float; `Float] in
+  let scene = `Struct[vec3; `Float; `Reference] in
+  [ `Extern("sqrt", [`Float], `Float);
+    `Extern("fopen", [string; string], stream);
+    `Extern("fputc", [`Int; stream], `Unit);
+    `Extern("fputs", [`Int; stream], `Unit);
+    `Extern("fclose", [stream], `Unit);
+
+    `Type("Sphere", `Unit);
+    `Type("Group", `Struct[scene; scene; scene; scene; scene]);
+
+    `Function
+      ("intersect", [ "o", vec3;
+		      "d", vec3;
+		      "hit", `Struct[`Float; vec3];
+		      "scene", scene ],
+       `Struct[`Float; vec3],
+       lets([ "l", GetValue(Var "hit", 0);
+	      "c", GetValue(Var "scene", 0);
+	      "r2", GetValue(Var "scene", 1);
+	      "s", GetValue(Var "scene", 2);
+	      "v", Var "c" -| Var "o";
+              "b", dot (Var "v") (Var "d");
+	      "disc2",
+	      sqr(Var "b") -: dot (Var "v") (Var "v") +: Var "r2" ],
+	    If(Var "disc2" <: Float 0.0, Var "hit",
+	       lets([ "disc", Apply(Var "sqrt", [Var "disc2"]);
+		      "t1", Var "b" -: Var "disc";
+		      "t2", Var "b" +: Var "disc"],
+		    If(Var "t2" >: Float 0.0,
+		       Let("l'", If(Var "t1" >: Float 0.0, Var "t1", Var "t2"),
+			   If(Var "l'" >=: Var "l", Var "hit",
+			      If(IsType(Var "s", "Sphere"),
+				 Struct[ Var "l'";
+					 unitise(Var "o" +|
+						     Var "l'" *| Var "d" -|
+							 Var "c") ],
+				 Let("g", Cast(Var "s", "Group"),
+				     List.fold_left
+				       (fun hit scene ->
+					  Apply(Var "intersect",
+						[Var "o"; Var "d"; hit; scene]))
+				       (Var "hit")
+				       (List.init 5 (fun i -> GetValue(Var "g", i))))))),
+		       Var "hit")))));
+    (*
+
+    `Function
+      ("intersect", [ "o", vec3;
+		      "d", vec3;
+		      "hit", `Struct[`Float; vec3];
+		      "scene", scene ],
+       `Struct[`Float; vec3],
+       lets([ "l", GetValue(Var "hit", 0);
+	      "c", GetValue(Var "scene", 0);
+	      "r", GetValue(Var "scene", 1);
+	      "s", GetValue(Var "scene", 2);
+	      "v", Var "c" -| Var "o";
+              "b", dot (Var "v") (Var "d");
+	      "disc2",
+	      Var "b" *: Var "b" -:
+		dot (Var "v") (Var "v") +:
+		Var "r" *: Var "r";
+	      "l'",
+	      If(Var "disc2" <: Float 0.0, Float infinity,
+		 lets([ "disc", Apply(Var "sqrt", [Var "disc2"]);
+			"t1", Var "b" -: Var "disc";
+			"t2", Var "b" +: Var "disc"],
+			If(Var "t2" >: Float 0.0,
+			   If(Var "t1" >: Float 0.0, Var "t1", Var "t2"),
+			   Float infinity))) ],
+	    If(Var "l'" >=: Var "l", Var "hit",
+	       If(IsType(Var "s", "Sphere"),
+		  Struct[ Var "l'";
+			  unitise(Var "o" +| Var "l'" *| Var "d" -| Var "c") ],
+		  Let("g", Cast(Var "s", "Group"),
+		      List.fold_left
+			(fun hit scene ->
+			   Apply(Var "intersect",
+				 [Var "o"; Var "d"; hit; scene]))
+			(Var "hit")
+			(List.init 5 (fun i -> GetValue(Var "g", i))))))));
+
+      `Function
+      ("intersect", [ "o", vec3;
+      "d", vec3;
+      "hit", `Struct[`Float; vec3];
+      "scene", scene ],
+      `Struct[`Float; vec3],
+      lets([ "l", GetValue(Var "hit", 0);
+      "c", GetValue(Var "scene", 0);
+      "r", GetValue(Var "scene", 1);
+      "s", GetValue(Var "scene", 2);
+      "v", Var "c" -| Var "o";
+      "disc2", dot (Var "v") (Var "v") -: Var "r" *: Var "r";
+      "l'",
+      If(Var "disc2" <: Float 0.0, Float infinity,
+      lets([ "b", dot (Var "v") (Var "d");
+      "b2", Var "b" *: Var "b" ],
+      If(Var "b2" <: Var "disc2", Float infinity,
+      lets([ "disc", Apply(Var "sqrt",
+      [Var "b2" -: Var "disc2"]);
+      "t1", Var "b" -: Var "disc" ],
+      If(Var "t1" >: Float 0.0, Var "t1",
+      Var "b" +: Var "disc"))))) ],
+      If(Var "l'" >: Var "l", Var "hit",
+      If(IsType(Var "s", "Sphere"),
+      Struct[ Var "l'";
+      unitise(Var "o" +| Var "l'" *| Var "d" -| Var "c") ],
+      Let("g", Cast(Var "s", "Group"),
+      List.fold_left
+      (fun hit scene ->
+      Apply(Var "intersect",
+      [Var "o"; Var "d"; hit; scene]))
+      (Var "hit")
+      (List.init 5 (fun i -> Get(Var "g", Int i))))))));
+    *)
+    `Function
+      ("create", ["level", `Int; "c", vec3; "r", `Float], scene,
+       Let("obj", Struct[Var "c"; sqr(Var "r"); Construct("Sphere", Unit)],
+	   If(Var "level" =: Int 1, Var "obj",
+	      Let("a", Float(3.0 /. sqrt 12.0) *: Var "r",
+		  let a = Var "a" in
+		  let aux x' z' =
+		    Apply(Var "create", [ Var "level" -: Int 1;
+					  Var "c" +| Struct[x'; a; z'];
+					  Float 0.5 *: Var "r" ]) in
+		  Struct[Var "c";
+			 sqr(Float 3.0 *: Var "r");
+			 Construct("Group",
+				   Struct[Var "obj";
+					  aux (~-: a) (~-: a);
+					  aux a (~-: a);
+					  aux (~-: a) a;
+					  aux a a])]))));
+
+    `Function
+      ("ray_trace", ["scene", scene; "light", vec3; "dir", vec3], `Float,
+       lets([ "ln", Apply(Var "intersect",
+			  [ zero; Var "dir"; nohit; Var "scene" ]);
+	      "l", GetValue(Var "ln", 0);
+	      "n", GetValue(Var "ln", 1);
+	      "g", dot (Var "n") (Var "light")],
+	    If(Var "g" <=: Float 0.0, Float 0.0,
+	       Let("p", Var "l" *| Var "dir" +|
+		       Float(sqrt epsilon_float) *| Var "n",
+		   let hit =
+		     Apply(Var "intersect",
+			   [ Var "p"; Var "light"; nohit; Var "scene" ]) in
+		   If(GetValue(hit, 0) <: Float infinity,
+		      Float 0.0,
+		      Var "g")))));
+
+    `Function
+      ("loop_x", [ "light", vec3;
+		  "scene", scene;
+		  "n", `Int;
+		  "out", stream;
+		  "y", `Int;
+		  "x", `Int ], `Unit,
+       let aux x d =
+	 FloatOfInt x -: FloatOfInt(Var "n") /: Float 2.0 +: 
+	   Float(float d) /: Float(float ss) in
+       let ray =
+	 let expr = ref(Float 0.0) in
+	 for dx=0 to ss-1 do
+	   for dy=0 to ss-1 do
+	     expr := !expr +:
+	       Apply(Var "ray_trace",
+		     [Var "scene";
+		      Var "light";
+		      unitise(Struct[aux (Var "x") dx;
+				     aux (Var "y") dy;
+				     FloatOfInt(Var "n")])])
+	   done
+	 done;
+	 !expr in
+       If(Var "x" =: Var "n", Unit,
+	  compound
+	    [ Apply(Var "fputc",
+		    [IntOfFloat
+		       (Float 0.5 +:
+			  Float 255.0 /: Float(float(ss*ss)) *:
+			  ray);
+		     Var "out"]);
+	      Apply(Var "loop_x", [ Var "light";
+				    Var "scene";
+				    Var "n";
+				    Var "out";
+				    Var "y";
+				    Var "x" +: Int 1 ]) ]));
+    
+    `Function
+      ("loop_y", [ "light", vec3;
+		   "scene", scene;
+		   "n", `Int;
+		   "out", stream;
+		   "y", `Int ], `Unit,
+       If(Var "y" <: Int 0, Unit,
+	  compound
+	    [ Printf("y=%d\n", [Var "y"]);
+	      Apply(Var "loop_x", [ Var "light";
+				    Var "scene";
+				    Var "n";
+				    Var "out";
+				    Var "y";
+				    Int 0 ]);
+	      Apply(Var "loop_y", [ Var "light";
+				    Var "scene";
+				    Var "n";
+				    Var "out";
+				    Var "y" -: Int 1 ]) ]));
+    
+    `Expr
+      (Let("out", Apply(Var "fopen", [of_string file; of_string "w"]),
+	   compound
+	     [ Apply(Var "fputs", [of_string(sprintf "P5\n%d %d\n255\n" n n);
+				   Var "out"]);
+	       Apply(Var "loop_y",
+		     [unitise(Struct[Float 1.0; Float 3.0; Float(-2.0)]);
+		      Apply(Var "create",
+			    [Int level;
+			     Struct[Float 0.0; Float(-1.0); Float 4.0];
+			     Float 1.0]);
+		      Int n;
+		      Var "out";
+		      Int(n-1)]);
+	       Apply(Var "fclose", [Var "out"]) ])) ]
+
 (*
 (** Render the Mandelbrot set with inlined complex arithmetic. *)
 let parallel_mandelbrot ns : Hlvm.t list =
@@ -826,6 +1091,7 @@ let parallel_mandelbrot ns : Hlvm.t list =
 (** Main program. *)
 let () =
   let defs =
+(*
     queens [] @
       threads 8 @
       tco 100000000 @
@@ -842,9 +1108,11 @@ let () =
       bubble_sort [100; 10000] @
       gc [1000; 1000000] @
       list [1000; 3000000] @
-(*
-      parallel_mandelbrot [1; 77] @
 *)
+      ray "image.pgm" 9 512 @
+      (*
+	parallel_mandelbrot [1; 77] @
+      *)
       [] in
   List.iter Hlvm.eval defs;
   Hlvm.save()

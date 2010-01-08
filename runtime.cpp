@@ -12,13 +12,13 @@ map<int, int> sizes;
 
 void add_size(void *key, int val) {
   pthread_mutex_lock(&mutex);
-  sizes[int(key)] = val;
+  sizes[long(key)] = val;
   pthread_mutex_unlock(&mutex);
 }
 
 int get_size(void *key) {
   pthread_mutex_lock(&mutex);
-  int size = sizes[int(key)];
+  int size = sizes[long(key)];
   pthread_mutex_unlock(&mutex);
   return size;
 }
@@ -53,7 +53,7 @@ extern "C" {
       if (debug)
         size = get_size(data);
       if (debug)
-        sizes.erase(int(data));
+        sizes.erase(long(data));
       if (size >= 0) {
         free(data);
       }

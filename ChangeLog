@@ -1,3 +1,11 @@
+Thu Jan  7 15:18:59 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Added a `Byte type to HLVM to make strings easier to use.
+	* Ported the ray tracer benchmark from OCaml to HLVM. HLVM is
+	  significantly faster despite the use of the FFI to do sqrt.
+	* Made runtime.cpp 64-bit happy (int -> long).
+
+
 Mon Jan  4 07:49:18 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 
 	* Inlined get_stack.

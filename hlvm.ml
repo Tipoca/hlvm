@@ -15,11 +15,11 @@ open Llvm_analysis
 module Options = struct
   (** Global boolean to enable viewing of generated functions. *)
   let view = ref false
-    
+  
   (** Global boolean to enable debug output in both the compiler and the
       generated code. Enabled by the command-line argument "--debug". *)
   let debug = ref false
-    
+  
   (** Compile without evaluating. *)
   let compile_only = ref false
   
@@ -45,6 +45,7 @@ module Type = struct
   type t =
       [ `Unit
       | `Bool
+      | `Byte
       | `Int
       | `Float
       | `Struct of t list
@@ -64,6 +65,7 @@ module Type = struct
  let rec to_string () : t -> string = function
     | `Unit -> "`Unit"
     | `Bool -> "`Bool"
+    | `Byte -> "`Byte"
     | `Int -> "`Int"
     | `Float -> "`Float"
     | `Struct tys -> sprintf "`Struct[%a]" to_strings tys
@@ -82,6 +84,8 @@ module Expr = struct
         (** The value () of the type unit. *)
     | Bool of bool
         (** A literal boolean value. *)
+    | Byte of int
+	(** A literal byte value. *)
     | Int of int
         (** A literal native int value. *)
     | Float of float
@@ -237,6 +241,7 @@ module Expr = struct
     | Null -> "Null"
     | Unit -> "Unit"
     | Bool b -> sprintf "Bool %b" b
+    | Byte n -> sprintf "Byte %d" n
     | Int n -> sprintf "Int %d" n
     | Float x -> sprintf "Float %g" x
     | Struct xs ->
@@ -364,6 +369,7 @@ module Expr = struct
     | Null
     | Unit
     | Bool _
+    | Byte _
     | Int _
     | Float _
     | Var _
@@ -513,9 +519,11 @@ let i32_type = i32_type llcontext
 
 let i64_type = i64_type llcontext
 
-let float_type = float_type llcontext
+let single_type = float_type llcontext
 
 let double_type = double_type llcontext
+
+let float_type = double_type
 
 (** Create an aggregate register (a struct) containing the given llvalues. *)
 let mk_struct state vs =
@@ -538,12 +546,12 @@ let int_type = match Sys.word_size with
 (** Is the given type represented by a struct. *)
 let is_struct = function
   | `Array _ | `Struct _ | `Reference -> true
-  | `Unit | `Bool | `Int | `Float | `Function _ -> false
+  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> false
 
 (** Is the given type a reference type. *)
 let is_ref_type = function
   | `Array _ | `Reference -> true
-  | `Struct _ | `Unit | `Bool | `Int | `Float | `Function _ -> false
+  | `Struct _ | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> false
 
 (** Layout of a reference type. *)
 module Ref = struct
@@ -575,9 +583,10 @@ end
 (** Convert a type from our type system into LLVM's type system. *)
 let rec lltype_of : Type.t -> lltype = function
   | `Unit -> int_type
-  | `Int -> int_type
   | `Bool -> i1_type
-  | `Float -> double_type
+  | `Byte -> i8_type
+  | `Int -> int_type
+  | `Float -> float_type
   | `Struct tys -> struct_type_of tys
   | `Function ty -> pointer_type(function_type_of ty)
   | `Array _ | `Reference -> Ref.lltype
@@ -638,6 +647,7 @@ let null = const_null string_type
 let rec null_of = function
   | `Unit -> Unit
   | `Bool -> Bool false
+  | `Byte -> Byte 0
   | `Int -> Int 0
   | `Float -> Float 0.0
   | `Struct tys -> Struct(List.map null_of tys)
@@ -872,7 +882,7 @@ module Extern = struct
   
   let free = dlfn "hlvm_free" void_type [string_type]
 
-  let time = dlfn "hlvm_time" double_type []
+  let time = dlfn "hlvm_time" float_type []
 
   let init = dlfn "hlvm_init" void_type []
 
@@ -907,13 +917,13 @@ module Extern = struct
 end
 
 (** LLVM global to store the total time spent in the suspend phase. *)
-let suspend_time = define_global "suspend_time" (const_float double_type 0.0) m
+let suspend_time = define_global "suspend_time" (const_float float_type 0.0) m
 
 (** LLVM global to store the total time spent in the mark phase. *)
-let mark_time = define_global "mark_time" (const_float double_type 0.0) m
+let mark_time = define_global "mark_time" (const_float float_type 0.0) m
 
 (** LLVM global to store the total time spent in the sweep phase. *)
-let sweep_time = define_global "sweep_time" (const_float double_type 0.0) m
+let sweep_time = define_global "sweep_time" (const_float float_type 0.0) m
 
 (** Default calling convention used by HLVM. *)
 let cc = CallConv.fast
@@ -1215,6 +1225,7 @@ and expr_aux vars state = function
 	*)
   | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
+  | Byte n -> state, (int8 n, `Byte)
   | Int n -> state, (int n, `Int)
   | Float x -> state, (float64 x, `Float)
   | Struct fs ->
@@ -1446,7 +1457,7 @@ and expr_aux vars state = function
 	| `Bool ->
 	    expr vars state
 	      (If(Var "x", Printf("true", []), Printf("false", [])))
-	| `Int -> expr vars state (Printf("%d", [Var "x"]))
+	| `Byte | `Int -> expr vars state (Printf("%d", [Var "x"]))
 	| `Float -> expr vars state (Printf("%g", [Var "x"]))
 	| `Struct tys ->
 	    let aux i = Print(GetValue(Var "x", i)) in
@@ -1720,7 +1731,7 @@ and gc_root vars state v ty =
   if !Options.debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
   match ty with
-  | `Unit | `Bool | `Int | `Float | `Function _ -> state
+  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> state
   | `Struct tys ->
       let f (i, state) ty =
 	let v = lazy(extractvalue state (Lazy.force v) i) in
@@ -1949,7 +1960,7 @@ and def_visit vars name c ty =
 (** Generate an expression that applies the function "f" to every value of a
     reference type in the value "v". *)
 and visit vars v = function
-  | `Unit | `Bool | `Int | `Float | `Function _ -> Unit, vars
+  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> Unit, vars
   | `Struct tys ->
       let f (i, (fs, vars)) ty =
 	let f, vars = visit vars (GetValue(v, i)) ty in
@@ -2073,7 +2084,7 @@ and init_type name llty llvisit llprint =
     functions and array fill functions. *)
 and mk_fun ?(debug=true) ?(pass_tl=true) vars cc f args ty_ret body =
   let (f, args, ty_ret, body) =
-    (if debug && !Options.debug then trace else (fun x -> x))
+    (if false && debug && !Options.debug then trace else (fun x -> x))
       (f, args, ty_ret, body) in
   if !Options.debug then
     printf "mk_fun ~pass_tl:%b %s\n%!" pass_tl f;
