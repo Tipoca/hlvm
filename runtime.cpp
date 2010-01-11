@@ -54,9 +54,7 @@ extern "C" {
         size = get_size(data);
       if (debug)
         sizes.erase(long(data));
-      if (size >= 0) {
-        free(data);
-      }
+      free(data);
     }
   }
 

@@ -22,7 +22,7 @@ let rec loop2((a, i, di) : bool array * int * int) : unit =
       loop2(a, i + di, di) );;
 
 let rec loop1((a, i) : bool array * int) : unit =
-  if i = length a then () else
+  if i >= length a then () else
     ( if a.[i] then loop2(a, 2*i, i) else ();
       loop1(a, i+1) );;
 
@@ -34,6 +34,7 @@ let rec sieve(n: int) : unit =
   loop1(a, 2);
   last(a, length a - 1);;
 
+sieve 1000;;
 sieve 100000000;;
 
 
@@ -192,4 +193,4 @@ test 8;;
 
 let rec ignore(a: (float * float) array) : unit = ();;
 
-ignore(fft(create(1048576, (0.0, 0.0))));;
+ignore(fft(create(524288, (0.0, 0.0))));;

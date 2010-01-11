@@ -38,6 +38,9 @@ module Options = struct
 
   (** Number of ticks before a GC check for cooperative synchronization. *)
   let ticks = 256
+
+  (** Use a stack handler to catch stack overflows. *)
+  let stack_handler = ref true
 end
 
 module Type = struct
@@ -966,6 +969,7 @@ let push self stack depth v =
 (** Get pointers to the stack depth and stack. *)
 (* FIXME: This hack should be replaced with term rewriting. *)
 let get_stack state =
+  assert(state#gc_enabled);
   let data =
     state#bitcast state#thread_local
       (pointer_type(lltype_of ThreadLocal.internal_ty)) in
@@ -1177,11 +1181,14 @@ let gc_push p =
 		   [ Set(Var "a", Var "n", Var "p");
 		     Store(n_visit, Var "n" +: Int 1) ]))))
 
-let gc_check =
-  Let("tick", GetThreadTick,
-      If(Var "tick" <: Int Options.ticks,
-	 SetThreadTick(Int 1 +: Var "tick"),
-	 Apply(Var "gc_check", [])))
+let gc_check() =
+  if !Options.gc_enabled then
+    Let("tick", GetThreadTick,
+	If(Var "tick" <: Int Options.ticks,
+	   SetThreadTick(Int 1 +: Var "tick"),
+	   Apply(Var "gc_check", [])))
+  else
+    Unit
 
 let llty_null = ref None
 
@@ -1352,10 +1359,15 @@ and expr_aux vars state = function
       let ty_a = `Array ty_x in
       let fill = fill vars ty_x in
       let state, _ =
-	expr vars state (Apply(fill, [Llvalue(a, `Array ty_x);
-				      Llvalue(x, ty_x);
-				      Int 0;
-				      Llvalue(n, `Int)])) in
+	expr vars state
+	  (Let("a", Llvalue(a, `Array ty_x),
+	       compound
+		 [ Apply(fill, [ Var "a";
+				 Llvalue(x, ty_x);
+				 Int 0;
+				 Llvalue(n, `Int) ]);
+		   If(AddressOf(Var "a") =: Int 0, Unit,
+		      SetMark(Var "a", 0)) ])) in
       let state = gc_root vars state (lazy a) ty_a in
       let state = gc_alloc vars state a in
       state, (a, ty_a)
@@ -1470,17 +1482,17 @@ and expr_aux vars state = function
 	| `Function _ -> expr vars state (Printf("<fun>", []))
 	| `Array _
 	| `Reference ->
-	      (*
-	    expr vars state
+	    (*
+	      expr vars state
 	      (Printf("<abstr>", []))
-	      *)
-		let llty = extractvalue state f Ref.llty in
-		let llty = state#bitcast llty (pointer_type RTType.lltype) in
-		let llty = state#load llty [int 0] in
-		let p = extractvalue state llty RTType.print in
-		let ty_p = `Function([ty_f], `Unit) in
-		let vars = add_val ("p", (p, ty_p)) vars in
-		expr vars state (Apply(Var "p", [Var "x"]))
+	    *)
+	    let llty = extractvalue state f Ref.llty in
+	    let llty = state#bitcast llty (pointer_type RTType.lltype) in
+	    let llty = state#load llty [int 0] in
+	    let p = extractvalue state llty RTType.print in
+	    let ty_p = `Function([ty_f], `Unit) in
+	    let vars = add_val ("p", (p, ty_p)) vars in
+	    expr vars state (Apply(Var "p", [Var "x"]))
       end
   | Visit f ->
       let state, (f, ty_f) = expr vars state f in
@@ -1552,6 +1564,7 @@ and expr_aux vars state = function
       if not(is_ref_type ty_f) then
 	invalid_arg "GetMark of non-reference";
       let mark = extractvalue state f Ref.mark in
+(*
       let ptr = state#int_of_ptr mark in
       let state, _ =
 	expr vars state
@@ -1559,8 +1572,9 @@ and expr_aux vars state = function
 	      compound [ Printf("Missing mark state\n", []);
 			 Exit(Int 1) ],
 	      Unit)) in
+*)
       let mark = state#load mark [int 0] in
-      let mark = build_sext mark int_type "int_of_mark" state#bb in
+      let mark = build_zext mark int_type "int_of_mark" state#bb in
       state, (mark, `Int)
   | SetMark(f, n) ->
       let state, (f, ty_f) = expr vars state f in
@@ -1612,7 +1626,7 @@ and expr_aux vars state = function
 		      dPrintf("%p terminating\n", [AddressOf GetThreadLocal]);
 		      ThreadLocal.free GetThreadLocal;
 		      dPrintf("%d registered threads\n",
-			     [Seq.count ThreadGlobal.load_list]);
+			      [Seq.count ThreadGlobal.load_list]);
 		    ]))) in
       (* Create new thread-local state, register it on the global thread list
 	 and return it. Note that this means a GC cannot occur without the
@@ -1834,78 +1848,93 @@ and def vars = function
 	   let state =
 	     gc_root vars state (lazy(ps())) (`Struct (List.map snd args)) in
 	   let body =
-	     if is_leaf body || not !Options.gc_enabled then body else
+	     if is_leaf body then body else
 	       compound
-		 [ gc_check;
+		 [ gc_check();
 		   body ] in
 	   return vars state body ty_ret)
   | `Expr f ->
       if !Options.debug then
 	printf "def <expr>\n%!";
 
-      let ty_handler = function_type void_type [|int_type; string_type|] in
-      let stackoverflow_install_handler =
-	declare_function "stackoverflow_install_handler"
-	  (function_type int_type
-	     [|pointer_type ty_handler; string_type; int_type|]) m in
-      let stackoverflow_deinstall_handler =
-	declare_function "stackoverflow_deinstall_handler"
-	  (function_type void_type [||]) m in
+      let handler k state =
+	if not !Options.stack_handler then k state else
+	  let size = 16384 in
+	  let stack = state#alloca (array_type i8_type size) in
+	  let stack = state#bitcast stack string_type in
+	  
+	  let ty_handler = function_type void_type [|int_type; string_type|] in
+	  let stackoverflow_install_handler =
+	    declare_function "stackoverflow_install_handler"
+	      (function_type int_type
+		 [|pointer_type ty_handler; string_type; int_type|]) m in
+	  let stackoverflow_deinstall_handler =
+	    declare_function "stackoverflow_deinstall_handler"
+	      (function_type void_type [||]) m in
+	  
+	  let llvm_handler =
+	    let llvm_f = define_function "handler" ty_handler m in
+	    let state = mk_state ~pass_tl:false llvm_f in
+	    String.iter
+	      (fun c ->
+		 ignore(state#call CallConv.c Extern.putchar [int(Char.code c)]))
+	      "Stack overflow\n";
+	    let _ = state#call CallConv.c Extern.exit [int 1] in
+	    let _ = build_ret_void state#bb in
+	    Llvm_analysis.assert_valid_function llvm_f;
+	    llvm_f in
 
-      let llvm_handler =
-	let llvm_f = define_function "handler" ty_handler m in
-	let state = mk_state ~pass_tl:false llvm_f in
-	String.iter
-	  (fun c ->
-	     ignore(state#call CallConv.c Extern.putchar [int(Char.code c)]))
-	  "Stack overflow\n";
-	let _ = state#call CallConv.c Extern.exit [int 1] in
-	let _ = build_ret_void state#bb in
-	Llvm_analysis.assert_valid_function llvm_f;
-	llvm_f in
+	  let _ =
+	    if not !Options.stack_handler then unit else
+	      state#call CallConv.c stackoverflow_install_handler
+		[llvm_handler; stack; int size] in
+
+	  let state = k state in
+
+	  let _ =
+	    state#call CallConv.c stackoverflow_deinstall_handler [] in
+
+	  state in
 
       let f_name = "eval_expr" in
       let vars' =
 	defun ~pass_tl:false vars CallConv.c f_name ["", `Int] `Unit
 	  (fun vars state ->
-	     let size = 16384 in
-	     let stack = state#alloca (array_type i8_type size) in
-	     let stack = state#bitcast stack string_type in
-	     let _ =
-	       state#call CallConv.c stackoverflow_install_handler
-		 [llvm_handler; stack; int size] in
-	     let start_time = Llvalue(state#time, `Float) in
-	     (*
-	       let state, _ =
-	       expr vars state
-	       (dPrintf("# "^Expr.to_string () f^"\n", [])) in
-	     *)
-	     let state, (f, ty_f) =
-	       expr vars state
-		 (compound
-		    [ Store(suspend_time, Float 0.0);
-		      Store(mark_time, Float 0.0);
-		      Store(sweep_time, Float 0.0);
-		      f ]) in
-	     let f =
-	       compound
-		 [ Printf("- : "^Type.to_string () ty_f^" = ", []);
-		   Print(Llvalue(f, ty_f));
-		   Printf("\n", []) ] in
-	     let state, _ = expr vars state f in
-	     state#gc_restore();
-	     let state, _ =
-	       expr vars state
-		 (Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
-	     let state, _ =
-	       expr vars state
-		 (Printf("%gs total; %gs suspend; %gs mark; %gs sweep\n",
-			 [ Time -: start_time;
-			   Load(suspend_time, `Float);
-			   Load(mark_time, `Float);
-			   Load(sweep_time, `Float) ])) in
-	     let _ =
-	       state#call CallConv.c stackoverflow_deinstall_handler [] in
+	     let state =
+	       handler
+		 (fun state ->
+		    let start_time = Llvalue(state#time, `Float) in
+		    (*
+		      let state, _ =
+		      expr vars state
+		      (dPrintf("# "^Expr.to_string () f^"\n", [])) in
+		    *)
+		    let state, (f, ty_f) =
+		      expr vars state
+			(compound
+			   [ Store(suspend_time, Float 0.0);
+			     Store(mark_time, Float 0.0);
+			     Store(sweep_time, Float 0.0);
+			     f ]) in
+		    let f =
+		      compound
+			[ Printf("- : "^Type.to_string () ty_f^" = ", []);
+			  Print(Llvalue(f, ty_f));
+			  Printf("\n", []) ] in
+		    let state, _ = expr vars state f in
+		    state#gc_restore();
+		    let state, _ =
+		      expr vars state
+			(Printf("Live: %d\n", [Load(n_allocated, `Int)]))in
+		    let state, _ =
+		      expr vars state
+			(Printf("%gs total; %gs suspend; %gs mark; %gs sweep\n",
+				[ Time -: start_time;
+				  Load(suspend_time, `Float);
+				  Load(mark_time, `Float);
+				  Load(sweep_time, `Float) ])) in
+		    state)
+		 state in
 	     return vars state Unit `Unit) in
       let llvm_f, _ = List.assoc f_name vars'.vals in
       ignore(run_function llvm_f);
@@ -2104,20 +2133,20 @@ and mk_fun ?(debug=true) ?(pass_tl=true) vars cc f args ty_ret body =
    to O(log n) so our bootstrapping code can work (fill the shadow stack etc.)
    without stack overflowing even if tail calls are disabled. *)
 and fill vars ty =
-(*
-  let f = sprintf "Array.fill<%a>" Type.to_string ty in
-  let llvm_f =
+  (*
+    let f = sprintf "Array.fill<%a>" Type.to_string ty in
+    let llvm_f =
     mk_fun vars cc f [ "a", `Array ty;
-		       "x", ty;
-		       "i", `Int;
-		       "j", `Int] `Unit
-      (If(Var "i" <: Var "j",
-	  compound
-	    [ Set(Var "a", Var "i", Var "x");
-	      Apply(Var f, [Var "a"; Var "x"; Var "i" +: Int 1; Var "j"]) ],
-	  Unit)) in
-  Llvalue(llvm_f, `Function([`Array ty; ty; `Int; `Int], `Unit))
-*)
+    "x", ty;
+    "i", `Int;
+    "j", `Int] `Unit
+    (If(Var "i" <: Var "j",
+    compound
+    [ Set(Var "a", Var "i", Var "x");
+    Apply(Var f, [Var "a"; Var "x"; Var "i" +: Int 1; Var "j"]) ],
+    Unit)) in
+    Llvalue(llvm_f, `Function([`Array ty; ty; `Int; `Int], `Unit))
+  *)
   let f = sprintf "Array.fill<%a>" Type.to_string ty in
   let llvm_f =
     mk_fun vars cc f [ "a", `Array ty;
@@ -2262,19 +2291,18 @@ let boot() : t list =
 			mark_one(Get(Var "a", Var "n"));
 			Apply(Var "gc_mark_3", []) ]))));
       
-      (* Mark all roots on the shadow stack and then mark the whole heap. *)
+      (* Mark all roots on the given shadow stack. *)
       `UnsafeFunction
 	("gc_mark_2", ["stack", Seq.ty `Reference; "i", `Int], `Unit,
-	 Let("n", GetValue(Var "stack", 0),
-	     If(Var "i" =: Var "n", Unit,
-		Let("a", GetValue(Var "stack", 1),
-		    compound
-		      [ Let("p", Get(Var "a", Var "i"),
-			    If(AddressOf(Var "p") =: Int 0, Unit,
-			       mark_one(Var "p")));
-			Apply(Var "gc_mark_2", [Var "stack";
-						Var "i" +: Int 1]) ]))));
+	 If(Var "i" =: Seq.count(Var "stack"), Unit,
+	    compound
+	      [ Let("p", Seq.get(Var "stack", Var "i"),
+		    If(AddressOf(Var "p") =: Int 0, Unit,
+		       mark_one(Var "p")));
+		Apply(Var "gc_mark_2", [Var "stack";
+					Var "i" +: Int 1]) ]));
       
+      (* Mark each shadow stack and then mark the whole heap. *)
       `UnsafeFunction
 	("gc_mark", ["i", `Int], `Unit,
 	 Let("a", ThreadGlobal.load_list,
@@ -2282,10 +2310,10 @@ let boot() : t list =
 		Apply(Var "gc_mark_3", []),
 		compound
 		  [ dPrintf("Marking %d roots from %p\n",
-			   [Seq.count
-			      (ThreadLocal.stack_of
-				 (Get(Seq.get(Var "a", Var "i"), Int 0)));
-			    AddressOf(Seq.get(Var "a", Var "i"))]);
+			    [Seq.count
+			       (ThreadLocal.stack_of
+				  (Get(Seq.get(Var "a", Var "i"), Int 0)));
+			     AddressOf(Seq.get(Var "a", Var "i"))]);
 		    Apply(Var "gc_mark_2",
 			  [ ThreadLocal.stack_of
 			      (Get(Seq.get(Var "a", Var "i"), Int 0));
@@ -2455,6 +2483,9 @@ let () =
 		| "--no-gc" ->
 		    printf "GC disabled.\n%!";
 		    Options.gc_enabled := false
+		| "--no-stack-handler" ->
+		    printf "Stack handler disabled.\n%!";
+		    Options.stack_handler := false
 		| "--no-tco" ->
 		    printf "Tail call elimination disabled.\n%!";
 		    Options.tco := false

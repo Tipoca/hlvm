@@ -532,7 +532,7 @@ let gc ns =
       (* Add the reference to the hash table. *)
       `Function("add", [ "a", `Array(`Struct[`Int; ty_bkt]);
 			 "p", `Reference ], `Unit,
-		Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		Let("h", Apply(Var "abs", [Cast(Var "p", "Int") %: Int q]),
 		    Set(Var "a", Var "h",
 			Let("nb", Get(Var "a", Var "h"),
 			    Struct
@@ -549,12 +549,12 @@ let gc ns =
 	     If(Var "i" =: Var "n",
 		compound
 		  [ Printf("WARNING: Pointer not found: ", []);
-		    Print(AddressOf(Var "p"));
+		    Print(Cast(Var "p", "Int"));
 		    Printf("\n", []);
 		    Bool false ],
 		Let("p2", Get(Var "a", Var "i"),
-		    If(AddressOf(GetValue(Var "p2", 0)) =:
-			AddressOf(Var "p"),
+		    If(Cast(GetValue(Var "p2", 0), "Int") =:
+			Cast(Var "p", "Int"),
 		       If(GetValue(Var "p2", 1), Bool false,
 			  compound
 			    [ Set(Var "a", Var "i",
@@ -567,7 +567,7 @@ let gc ns =
 
       `Function("mark0", [ "a", `Array(`Struct[`Int; ty_bkt]);
 			   "p", `Reference ], `Bool,
-		Let("h", Apply(Var "abs", [AddressOf(Var "p") %: Int q]),
+		Let("h", Apply(Var "abs", [Cast(Var "p", "Int") %: Int q]),
 		    Apply(Var "mark1", [ GetValue(Get(Var "a", Var "h"), 1);
 					 Var "p";
 					 Int 0 ])));
@@ -994,6 +994,9 @@ let ray file level n : Hlvm.t list =
 				    Var "out";
 				    Var "y" -: Int 1 ]) ]));
     
+    (* FIXME: Taking the address of a byte array and passing it to C as a
+       string is naughty because the GC might collect it (although the
+       current one will not). *)
     `Expr
       (Let("out", Apply(Var "fopen", [of_string file; of_string "w"]),
 	   compound
@@ -1083,27 +1086,46 @@ let parallel_mandelbrot ns : Hlvm.t list =
 let () =
   let defs =
 (*
-    queens [] @
-      threads 8 @
-      tco 100000000 @
-      tuples @
-      trig @
-      curry @
-      fib [10; 40] @
-      ffib [10.0; 40.0] @
-      sieve [1000; 100000000] @
-      mandelbrot [1; 77] @
-      mandelbrot2 [1; 77] @
-      fold [1000; 100000000] @
-      queens [8;8;9;10] @
-      bubble_sort [100; 10000] @
-      gc [1000; 1000000] @
-      list [1000; 3000000] @
+    ray "image.pgm" 9 512 @
+    gc [1000]
 *)
-      ray "image.pgm" 9 512 @
-      (*
-	parallel_mandelbrot [1; 77] @
-      *)
-      [] in
+    if !Options.tco then
+      queens [] @
+	threads 8 @
+	tco 100000000 @
+	tuples @
+	trig @
+	curry @
+	fib [10; 40] @
+	ffib [10.0; 40.0] @
+	sieve [1000; 100000000] @
+	mandelbrot [1; 77] @
+	mandelbrot2 [1; 77] @
+	fold [1000; 100000000] @
+	queens [8;8;9;10] @
+	bubble_sort [100; 10000] @
+	gc [1000; 1000000] @
+	list [1000; 3000000] @
+	ray "image.pgm" 9 512 @
+	[]
+    else
+      queens [] @
+	threads 8 @
+	tuples @
+	trig @
+	curry @
+	fib [10; 40] @
+	ffib [10.0; 40.0] @
+	sieve [1000] @
+	mandelbrot [1; 77] @
+	mandelbrot2 [1; 77] @
+	fold [1000] @
+	queens [8;8;9;10] @
+	bubble_sort [100; 10000] @
+	gc [1000] @
+	list [1000] @
+	ray "image.pgm" 9 512 @
+	[]
+  in
   List.iter Hlvm.eval defs;
   Hlvm.save()
