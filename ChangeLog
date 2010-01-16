@@ -1,3 +1,11 @@
+Sat Jan 16 12:17:05 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Disabling TCO now uses a separate set of tests that do not require
+	TCO so they should all run.
+	* Applied bluestorm's patches for Makefile and camlp4 macros to make it
+	easier to write HLVM IR.
+
+
 Sun Jan 10 16:29:16 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 
 	* Removed the use of AddressOf in the hash table test.

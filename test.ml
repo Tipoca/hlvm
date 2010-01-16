@@ -1085,10 +1085,6 @@ let parallel_mandelbrot ns : Hlvm.t list =
 (** Main program. *)
 let () =
   let defs =
-(*
-    ray "image.pgm" 9 512 @
-    gc [1000]
-*)
     if !Options.tco then
       queens [] @
 	threads 8 @
@@ -1106,7 +1102,7 @@ let () =
 	bubble_sort [100; 10000] @
 	gc [1000; 1000000] @
 	list [1000; 3000000] @
-	ray "image.pgm" 9 512 @
+	ray "image.pgm" 12 1024 @
 	[]
     else
       queens [] @
@@ -1124,7 +1120,7 @@ let () =
 	bubble_sort [100; 10000] @
 	gc [1000] @
 	list [1000] @
-	ray "image.pgm" 9 512 @
+	ray "image.pgm" 12 1024 @
 	[]
   in
   List.iter Hlvm.eval defs;

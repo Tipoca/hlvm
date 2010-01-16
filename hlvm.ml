@@ -1226,10 +1226,6 @@ and expr_aux vars state = function
 	    llty_null := Some llty;
 	    llty in
       state, (Ref.mk state llty (int 0) null null, `Reference)
-	(*
-	  expr vars state (Magic(Alloc(Int 0, Int 0), `Reference))
-	  state, (Ref.mk state null (int 0) null null, `Reference)
-	*)
   | Unit -> state, (unit, `Unit)
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Byte n -> state, (int8 n, `Byte)
