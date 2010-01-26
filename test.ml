@@ -4,6 +4,9 @@ open Printf
 open Hlvm
 open Expr
 
+let ( |> ) x f = f x
+let floatOfInt x = FloatOfInt(`Float, x)
+
 (** Integer Fibonacci benchmark *)
 let fib ns : Hlvm.t list =
   let n = Var "n" in
@@ -107,9 +110,9 @@ let mandelbrot ns : Hlvm.t list =
 	    [ Apply(Var "pixel",
 		    [Int 0;
 		     Float 0.0; Float 0.0;
-		     Float 2.0 *: FloatOfInt(Var "i") /: FloatOfInt(Var "n") -:
+		     Float 2.0 *: floatOfInt(Var "i") /: floatOfInt(Var "n") -:
 		       Float 1.5;
-		     Float 2.0 *: FloatOfInt(Var "j") /: FloatOfInt(Var "n") -:
+		     Float 2.0 *: floatOfInt(Var "j") /: floatOfInt(Var "n") -:
 		       Float 1.0]);
 	      Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
 
@@ -161,10 +164,10 @@ let mandelbrot2 ns : Hlvm.t list =
             [ Apply(Var "pixel",
                     [Int 0;
                      Struct[Float 0.0; Float 0.0];
-                     Struct[Float 2.0 *: FloatOfInt(Var "i") /:
-                              FloatOfInt(Var "n") -: Float 1.5;
-                            Float 2.0 *: FloatOfInt(Var "j") /:
-                              FloatOfInt(Var "n") -: Float 1.0]]);
+                     Struct[Float 2.0 *: floatOfInt(Var "i") /:
+                              floatOfInt(Var "n") -: Float 1.5;
+                            Float 2.0 *: floatOfInt(Var "j") /:
+                              floatOfInt(Var "n") -: Float 1.0]]);
               Apply(Var "row", [Var "i" +: Int 1; Var "j"; Var "n"])]));
 
     `Function
@@ -687,8 +690,8 @@ let bubble_sort ns =
           compound
             [ Set(Var "a", Var "i",
 		  Apply(Var "sin",
-			[Float 3.0 *: (FloatOfInt(Var "i") /:
-					 FloatOfInt(Length(Var "a")))]));
+			[Float 3.0 *: (floatOfInt(Var "i") /:
+					 floatOfInt(Length(Var "a")))]));
               Apply(Var "init", [Var "a"; Var "i" +: Int 1]) ])) ] @
     List.map
     (fun n ->
@@ -763,7 +766,7 @@ let atomic =
 				      JoinThread(Var "t2") ])));
 		      Printf("n=%d\n", [Get(Var "a", Int 0)]) ]))) ]
 
-let ray file level n : Hlvm.t list =
+let ray args : Hlvm.t list =
   let rec lets = function
     | [], x -> x
     | (var, expr)::xs, x -> Let(var, expr, lets(xs, x)) in
@@ -884,10 +887,8 @@ let ray file level n : Hlvm.t list =
 			   max(Var "r",
 			       length(Var "c" -| Var "c'") +: Var "r'")]),
 	       Let("g", Cast(Var "scene", "Group"),
-		   List.fold_left
-		     (fun bound scene -> Apply(Var "bound", [bound; scene]))
-		     (Var "b")
-		     (List.init 5 (fun i -> GetValue(Var "g", i)))))));
+		   let f b i = Apply(Var "bound", [b; GetValue(Var "g", i)]) in
+		   f (f (f (f (f (Var "b") 0) 1) 2) 3) 4))));
 
     `Function
       ("create", ["level", `Int; "c", vec3; "r", `Float], scene,
@@ -907,13 +908,13 @@ let ray file level n : Hlvm.t list =
 					  aux (~-: a) a;
 					  aux a a]);
 			 "scene",
-			 Struct[Var "c"; sqr(Float 3.0 *: Var "r"); Var "g"] ],
+			 Struct[Var "c"; Float 0.0; Var "g"] ],
 		       Let("b",
 			   Apply(Var "bound",
 				 [Struct
 				    [Var "c" +|
 					 Struct[Float 0.0; Var "r"; Float 0.0];
-				     Float 0.0];
+				     Float 3.0 *: Var "r"];
 				  Var "scene"]),
 			   Struct[GetValue(Var "b", 0);
 				  sqr(GetValue(Var "b", 1));
@@ -936,13 +937,13 @@ let ray file level n : Hlvm.t list =
 
     `Function
       ("loop_x", [ "light", vec3;
-		  "scene", scene;
-		  "n", `Int;
-		  "out", stream;
-		  "y", `Int;
-		  "x", `Int ], `Unit,
+		   "scene", scene;
+		   "n", `Int;
+		   "out", `Array `Byte;
+		   "y", `Int;
+		   "x", `Int ], `Unit,
        let aux x d =
-	 FloatOfInt x -: FloatOfInt(Var "n") /: Float 2.0 +: 
+	 floatOfInt x -: floatOfInt(Var "n") /: Float 2.0 +: 
 	   Float(float d) /: Float(float ss) in
        let ray =
 	 let expr = ref(Float 0.0) in
@@ -952,136 +953,115 @@ let ray file level n : Hlvm.t list =
 	       Apply(Var "ray_trace",
 		     [Var "scene";
 		      Var "light";
-		      unitise(Struct[aux (Var "x") dx;
-				     aux (Var "y") dy;
-				     FloatOfInt(Var "n")])])
+		      unitise(Struct[ aux (Var "x") dx;
+				      aux (Var "y") dy;
+				      floatOfInt(Var "n") ])])
 	   done
 	 done;
 	 !expr in
        If(Var "x" =: Var "n", Unit,
 	  compound
-	    [ Apply(Var "fputc",
-		    [IntOfFloat
-		       (Float 0.5 +:
-			  Float 255.0 /: Float(float(ss*ss)) *:
-			  ray);
-		     Var "out"]);
+	    [ Set(Var "out", Var "x" +: Var "n" *:
+		    (Var "n" -: Var "y" -: Int 1),
+		  IntOfFloat
+		    (`Byte,
+		     Float 0.5 +: Float 255.0 /: Float(float(ss*ss)) *: ray));
 	      Apply(Var "loop_x", [ Var "light";
 				    Var "scene";
 				    Var "n";
 				    Var "out";
 				    Var "y";
 				    Var "x" +: Int 1 ]) ]));
-    
-    `Function
-      ("loop_y", [ "light", vec3;
-		   "scene", scene;
-		   "n", `Int;
-		   "out", stream;
-		   "y", `Int ], `Unit,
-       If(Var "y" <: Int 0, Unit,
-	  compound
-	    [ Printf("y=%d\n", [Var "y"]);
-	      Apply(Var "loop_x", [ Var "light";
-				    Var "scene";
-				    Var "n";
-				    Var "out";
-				    Var "y";
-				    Int 0 ]);
-	      Apply(Var "loop_y", [ Var "light";
-				    Var "scene";
-				    Var "n";
-				    Var "out";
-				    Var "y" -: Int 1 ]) ]));
-    
-    (* FIXME: Taking the address of a byte array and passing it to C as a
-       string is naughty because the GC might collect it (although the
-       current one will not). *)
-    `Expr
-      (Let("out", Apply(Var "fopen", [of_string file; of_string "w"]),
-	   compound
-	     [ 
-(*
-	       Print(Apply(Var "create",
-			   [Int 3;
-			    Struct[Float 0.0; Float(-1.0); Float 4.0];
-			    Float 1.0]));
-*)
-	       Apply(Var "fputs", [of_string(sprintf "P5\n%d %d\n255\n" n n);
-				   Var "out"]);
-	       Apply(Var "loop_y",
-		     [unitise(Struct[Float 1.0; Float 3.0; Float(-2.0)]);
-		      Apply(Var "create",
-			    [Int level;
-			     Struct[Float 0.0; Float(-1.0); Float 4.0];
-			     Float 1.0]);
-		      Int n;
-		      Var "out";
-		      Int(n-1)]);
-	       Apply(Var "fclose", [Var "out"]) ])) ]
-
-(*
-(** Render the Mandelbrot set with inlined complex arithmetic. *)
-let parallel_mandelbrot ns : Hlvm.t list =
-  [ `Function
-      ("pixel", ["n", `Int;
-		 "zr", `Float; "zi", `Float;
-		 "cr", `Float; "ci", `Float], `Bool,
-       If(Var "n" =: Int 65536, Bool false,
-	  If(Var "zr" *: Var "zr" +: Var "zi" *: Var "zi" >=: Float 4.0,
-	     Bool true,
-	     Apply(Var "pixel",
-		   [Var "n" +: Int 1;
-		    Var "zr" *: Var "zr" -:
-		      Var "zi" *: Var "zi" +: Var "cr";
-		    Float 2.0 *: Var "zr" *: Var "zi" +: Var "ci";
-		    Var "cr"; Var "ci"]))));
-    
-    `Function
-      ("row", ["a", `Array `Bool; "i", `Int; "j", `Int; "n", `Int], `Unit,
-       If(Var "i" >: Var "n", Unit,
-	  compound
-	    [ Set(Var "a", Var "i",
-		  Apply(Var "pixel",
-			[Int 0;
-			 Float 0.0; Float 0.0;
-			 Float 2.0 *: FloatOfInt(Var "i") /:
-			   FloatOfInt(Var "n") -: Float 1.5;
-			 Float 2.0 *: FloatOfInt(Var "j") /:
-			   FloatOfInt(Var "n") -: Float 1.0]));
-	      Apply(Var "row",
-		    [Var "a"; Var "i" +: Int 1; Var "j"; Var "n"])]));
 
     `Function
-      ("print_row", ["a", `Array `Bool; "i", `Int], `Unit,
-       If(Var "i" =: Length(Var "a"), Unit,
-	  compound
-	    [ If(Get(Var "a", Var "i"), Printf(".", []), Printf(" ", []));
-	      Apply(Var "print_row", [Var "a"; Var "i" +: Int 1]) ]));
+      ("worker", [ "args", `Struct[ `Int;
+				    `Array `Int;
+				    `Struct[ vec3;
+					     scene;
+					     `Int;
+					     `Array `Byte ] ] ], `Unit,
+       compound
+	 [ lockMutex(GetValue(Var "args", 0));
+	   Let("a", GetValue(Var "args", 1),
+	       Let("y", Get(Var "a", Int 0),
+		   compound
+		     [ If(Var "y" <: Int 0, Unit,
+			  Set(Var "a", Int 0, Var "y" -: Int 1));
+		       UnlockMutex(GetValue(Var "args", 0));
+		       If(Var "y" <: Int 0, Unit,
+			  compound
+			    [ Let("args", GetValue(Var "args", 2),
+				  Apply(Var "loop_x",
+					[ GetValue(Var "args", 0);
+					  GetValue(Var "args", 1);
+					  GetValue(Var "args", 2);
+					  GetValue(Var "args", 3);
+					  Var "y";
+					  Int 0 ]));
+			      Apply(Var "worker", [Var "args"]) ]) ])) ]);
+    
+    `Extern("fwrite", [`Int; `Int; `Int; stream], `Unit) ] @
+    
+    (List.map
+       (fun (file, n_threads, level, n) ->
+	  [ `Function
+	      ("loop_y", [ "light", vec3;
+			   "scene", scene;
+			   "n", `Int;
+			   "out", stream;
+			   "y", `Int ], `Unit,
+	       Let("image", Alloc(Var "n" *: Var "n", Byte 0),
+		   Let("args", Struct [ CreateMutex;
+					Alloc(Int 1, Var "y");
+					Struct[ Var "light";
+						Var "scene";
+						Var "n";
+						Var "image" ] ],
+		       let rec mk_threads = function
+			 | 0 -> Unit
+			 | n ->
+			     Let("t", CreateThread(Var "worker", Var "args"),
+				 compound
+				   [ mk_threads(n-1);
+				     JoinThread(Var "t") ]) in
+		       compound
+			 [ mk_threads n_threads;
+			   Apply(Var "fwrite", [ AddressOf(Var "image");
+						 Int 1;
+						 Var "n" *: Var "n";
+						 Var "out" ]) ])));
+	    
+	    (* FIXME: Taking the address of a byte array and passing it to C
+	       as a string is naughty because the GC might collect it
+	       (although the current one will not). *)
+	    `Expr
+	      (Let("out", Apply(Var "fopen", [of_string file; of_string "w"]),
+		   compound
+		     [ Printf("Ray trace: %d threads %dx%d %d levels\n",
+			      [Int n_threads; Int n; Int n; Int level]);
+		       (*
+			 Print(Apply(Var "create",
+			 [Int 3;
+			 Struct[Float 0.0; Float(-1.0); Float 4.0];
+			 Float 1.0]));
+		       *)
+		       Apply(Var "fputs",
+			     [of_string(sprintf "P5\n%d %d\n255\n" n n);
+					   Var "out"]);
+		       Apply(Var "loop_y",
+			     [unitise
+				(Struct[Float 1.0; Float 3.0; Float(-2.0)]);
+			      Apply(Var "create",
+				    [Int level;
+				     Struct[Float 0.0; Float(-1.0); Float 4.0];
+				     Float 1.0]);
+			      Int n;
+			      Var "out";
+			      Int(n-1)]);
+		       Apply(Var "fclose", [Var "out"]) ])) ])
+       args
+    |> List.flatten)
 
-    `Function
-      ("col", ["j0", `Int; "j1", `Int], `Unit,
-       If(Var "j0" =: Var "j1", Unit,
-	  If(Var "j0" +: Int 1 =: Var "j1",
-	     Let("a", Alloc(Var "n" +: Int 1, Bool false),
-		 compound
-		   [ Apply(Var "row", [Var "a"; Int 0; Var "j"; Var "n"]);
-		     Apply(Var "print_row", [Var "a"; Int 0]);
-		     Printf("\n", []) ]),
-	     Let("a", Alloc(Var "n" +: Int 1, Bool false),
-		 compound
-		   [ Apply(Var "row", [Var "a"; Int 0; Var "j"; Var "n"]);
-		     Apply(Var "print_row", [Var "a"; Int 0]);
-		     Printf("\n", []);
-		     Apply(Var "col", [Var "j" +: Int 1; Var "n"])]))) ] @
-    List.map
-    (fun n ->
-       `Expr
-	 (compound
-            [ Printf("\nMandelbrot with inline complex arithmetic\n", []);
-              Apply(Var "col", [Int 0; Int(n+1)]) ]))
-    ns
-*)
 (** Main program. *)
 let () =
   let defs =
@@ -1102,7 +1082,7 @@ let () =
 	bubble_sort [100; 10000] @
 	gc [1000; 1000000] @
 	list [1000; 3000000] @
-	ray "image.pgm" 12 1024 @
+	ray(List.init 24 (fun i -> "image_11_2048.pgm", 8-i/3, 11, 2048)) @
 	[]
     else
       queens [] @
@@ -1120,7 +1100,7 @@ let () =
 	bubble_sort [100; 10000] @
 	gc [1000] @
 	list [1000] @
-	ray "image.pgm" 12 1024 @
+	ray(List.init 24 (fun i -> "image_11_2048.pgm", 8-i/3, 11, 2048)) @
 	[]
   in
   List.iter Hlvm.eval defs;

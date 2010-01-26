@@ -41,6 +41,9 @@ module Options = struct
 
   (** Use a stack handler to catch stack overflows. *)
   let stack_handler = ref true
+
+  (** The maximum number of times a recursive function will be unrolled. *)
+  let unroll = 16
 end
 
 module Type = struct
@@ -125,9 +128,9 @@ module Expr = struct
             arguments. *)
     | Printf of string * t list
         (** Call C printf (unsafe). *)
-    | IntOfFloat of t
+    | IntOfFloat of [`Byte | `Int] * t
         (** Convert a float to an int. *)
-    | FloatOfInt of t
+    | FloatOfInt of [`Float] * t
         (** Convert an int to a float. *)
     | Construct of string * t
         (** Construct a boxed value. *)
@@ -274,9 +277,9 @@ module Expr = struct
         sprintf "Apply(%a, [%a])" to_string f (to_strings "; ") xs
     | Printf(s, fs) ->
         sprintf "Printf(\"%s\", [%a])" (String.escaped s) (to_strings "; ") fs
-    | IntOfFloat f ->
+    | IntOfFloat(_, f) ->
         sprintf "IntOfFloat(%a)" to_string f
-    | FloatOfInt f ->
+    | FloatOfInt(_, f) ->
         sprintf "FloatOfInt(%a)" to_string f
     | Return(f, ty) ->
         sprintf "Return(%a, %a)" to_string f Type.to_string ty
@@ -346,8 +349,8 @@ module Expr = struct
     | Set(a, i, x) -> Set(r a, r i, r x)
     | Apply(f, xs) -> Apply(r f, List.map r xs)
     | Printf(s, xs) -> Printf(s, List.map r xs)
-    | IntOfFloat x -> IntOfFloat(r x)
-    | FloatOfInt x -> FloatOfInt(r x)
+    | IntOfFloat(ty, x) -> IntOfFloat(ty, r x)
+    | FloatOfInt(ty, x) -> FloatOfInt(ty, r x)
     | Construct(c, v) -> Construct(c, r v)
     | IsType(v, c) -> IsType(r v, c)
     | Print e -> Print(r e)
@@ -420,7 +423,7 @@ module Expr = struct
     if n=0 then x else nest (n-1) f (f x)
 
   let unroll f args body =
-    nest 16 (unroll f args body) body
+    nest Options.unroll (unroll f args body) body
 
   let dPrintf(string, args) =
     if !Options.debug then
@@ -1448,14 +1451,16 @@ and expr_aux vars state = function
       let args = List.map ext args in
       ignore(state#call CallConv.c Extern.printf (spec::args));
       state, (unit, `Unit)
-  | IntOfFloat f ->
+  | IntOfFloat(ty, f) ->
+      let ty = (ty :> Type.t) in
       let state, (f, ty_f) = expr vars state f in
       type_check "IntOfFloat of non-float" ty_f `Float;
-      state, (build_fptosi f (lltype_of `Int) "" state#bb, `Int)
-  | FloatOfInt f ->
+      state, (build_fptosi f (lltype_of ty) "" state#bb, ty)
+  | FloatOfInt(ty, f) ->
+      let ty = (ty :> Type.t) in
       let state, (f, ty_f) = expr vars state f in
       type_check "FloatOfInt of non-int" ty_f `Int;
-      state, (build_sitofp f (lltype_of `Float) "" state#bb, `Float)
+      state, (build_sitofp f (lltype_of ty) "" state#bb, ty)
   | Print f ->
       let state, (f, ty_f) = expr vars state f in
       let vars = add_val ("x", (f, ty_f)) vars in
@@ -2396,7 +2401,7 @@ let boot() : t list =
 	     dPrintf("GC sweeping...\n", []);
 	     time sweep_time [ Apply(Var "gc_sweep", [Int 0]) ];
 	     dPrintf("GC done. Live: %d\n\n", [Load(n_allocated, `Int)]);
-	     Store(quota, Int 256 +: Int 4 *: Load(n_allocated, `Int));
+	     Store(quota, Int 256 +: Int 2 *: Load(n_allocated, `Int));
 	     dPrintf("GC finished. Restarting %d mutators with quota %d.\n",
 		     [Seq.count(ThreadGlobal.load_list); Load(quota, `Int)]);
 	     ThreadGlobal.lock(ThreadGlobal.store_state State.run);
