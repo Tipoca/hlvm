@@ -784,9 +784,10 @@ let ray args : Hlvm.t list =
   let ( -| ) a b =
     Struct(List.init 3 (fun i -> GetValue(a, i) -: GetValue(b, i))) in
   let dot a b =
-    GetValue(a, 0) *: GetValue(b, 0) +:
-      GetValue(a, 1) *: GetValue(b, 1) +:
-      GetValue(a, 2) *: GetValue(b, 2) in
+    lets(["a", a; "b", b],
+	  GetValue(Var "a", 0) *: GetValue(Var "b", 0) +:
+	    GetValue(Var "a", 1) *: GetValue(Var "b", 1) +:
+	    GetValue(Var "a", 2) *: GetValue(Var "b", 2)) in
   let length r =
     Let("r", r, Apply(Var "sqrt", [dot (Var "r") (Var "r")])) in
   let unitise a =

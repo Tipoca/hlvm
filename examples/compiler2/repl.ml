@@ -125,9 +125,9 @@ let () =
      `Function("print_char", ["c", `Int], `Unit,
 	       Expr.Apply(Expr.Var "putchar", [Expr.Var "c"]));
      `Function("float_of_int", ["n", `Int], `Float,
-	       Expr.FloatOfInt(Expr.Var "n"));
+	       Expr.FloatOfInt(`Float, Expr.Var "n"));
      `Function("int_of_float", ["x", `Float], `Int,
-	       Expr.IntOfFloat(Expr.Var "x"));
+	       Expr.IntOfFloat(`Int, Expr.Var "x"));
      `Function("float_array", ["nx", `Struct[`Int; `Float]], `Array `Float,
 	       Expr.Alloc(Expr.GetValue(Expr.Var "nx", 0),
 			  Expr.GetValue(Expr.Var "nx", 1)))
