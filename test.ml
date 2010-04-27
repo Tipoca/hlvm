@@ -799,11 +799,13 @@ let ray args : Hlvm.t list =
   let zero = Struct[Float 0.0; Float 0.0; Float 0.0] in
   let nohit = Struct[Float infinity; zero] in
   let ss = 4 in
+(*
   let array (x, xs) =
     Let("arr", Alloc(Int(1 + List.length xs), x),
 	compound
 	  (List.mapi (fun i x -> Set(Var "arr", Int(1+i), x)) xs @
 	     [Var "arr"])) in
+*)
   let vec3 = `Struct[`Float; `Float; `Float] in
   let scene = `Struct[vec3; `Float; `Reference] in
   [ `Extern("sqrt", [`Float], `Float);

@@ -43,9 +43,14 @@ module Options = struct
   let stack_handler = ref true
 
   (** The maximum number of times a recursive function will be unrolled. *)
-  let unroll = 16
+  let unroll = 0 (* 16 *)
 end
 
+let rec list_to_string f sep () = function
+  | [] -> ""
+  | [h] -> f () h
+  | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
+      
 module Type = struct
   (** The type system. *)
   type t =
@@ -59,16 +64,17 @@ module Type = struct
       | `Function of t list * t
       | `Reference ]
   
-  let eq (ty1: t) (ty2: t) = ty1=ty2
+  let rec eq (ty1: t) (ty2: t) = match ty1, ty2 with
+    | `Struct tys1, `Struct tys2 -> eqs tys1 tys2
+    | `Array ty1, `Array ty2 -> eq ty1 ty2
+    | `Function(ty_args1, ty_ret1), `Function(ty_args2, ty_ret2) ->
+	eqs (ty_ret1::ty_args1) (ty_ret2::ty_args2)
+    | ty1, ty2 -> ty1 = ty2
+  and eqs tys1 tys2 = List.for_all2 eq tys1 tys2
   
   open Printf
   
-  let rec list_to_string f sep () = function
-    | [] -> ""
-    | [h] -> f () h
-    | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
-  
- let rec to_string () : t -> string = function
+  let rec to_string () : t -> string = function
     | `Unit -> "`Unit"
     | `Bool -> "`Bool"
     | `Byte -> "`Byte"
@@ -237,11 +243,6 @@ module Expr = struct
     | `Ne -> "`Ne"
     | `Ge -> "`Ge"
     | `Gt -> "`Gt"
-  
-  let rec list_to_string f sep () = function
-    | [] -> ""
-    | [h] -> f () h
-    | h::t -> sprintf "%a%s%a" f h sep (list_to_string f sep) t
   
   let rec to_string () = function
     | Null -> "Null"
