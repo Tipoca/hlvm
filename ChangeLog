@@ -1,3 +1,11 @@
+Sun Dec 19 16:40:33 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Added support for 64-bit ints in order to run the hailstones
+	benchmark. HLVM generates code that is over 30x faster than OCaml and
+	Haskell (GHC 6.10).
+	* Updated requirements to LLVM 2.8.
+	
+
 Wed Dec  1 22:35:30 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 
 	* Updated arithmetic ops to use fadd, fsub etc. for floating point

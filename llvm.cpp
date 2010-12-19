@@ -6,7 +6,7 @@ extern "C" {
 
   void enable_tail_call_opt() {
     cout << "Enabling TCO" << endl;
-    llvm::PerformTailCallOpt = true;
+    //llvm::PerformTailCallOpt = true;
     llvm::GuaranteedTailCallOpt = true;
   }
 

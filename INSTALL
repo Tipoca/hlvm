@@ -5,7 +5,7 @@ Dependencies
 ------------
 
 . libsigsegv >=2.5.
-. LLVM sources >=2.6.
+. LLVM sources >=2.8.
 . OCaml >=3.10.2.
 
 
