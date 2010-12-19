@@ -30,20 +30,19 @@ module Options = struct
   let shadow_stack_enabled = ref true
 
   (** Maximum depth of the shadow stacks, visit stack and allocated list. *)
-  let max_depth =
-    1 lsl 23
+  let max_depth = 1 lsl 23
 
   (** Tail call elimination enabled. *)
   let tco = ref true
 
   (** Number of ticks before a GC check for cooperative synchronization. *)
-  let ticks = 256
+  let ticks = 65536
 
   (** Use a stack handler to catch stack overflows. *)
   let stack_handler = ref true
 
   (** The maximum number of times a recursive function will be unrolled. *)
-  let unroll = 0 (* 16 *)
+  let unroll = 0
 end
 
 let rec list_to_string f sep () = function
@@ -58,6 +57,7 @@ module Type = struct
       | `Bool
       | `Byte
       | `Int
+      | `Int64
       | `Float
       | `Struct of t list
       | `Array of t
@@ -79,6 +79,7 @@ module Type = struct
     | `Bool -> "`Bool"
     | `Byte -> "`Byte"
     | `Int -> "`Int"
+    | `Int64 -> "`Int64"
     | `Float -> "`Float"
     | `Struct tys -> sprintf "`Struct[%a]" to_strings tys
     | `Array ty -> sprintf "`Array(%a)" to_string ty
@@ -100,6 +101,8 @@ module Expr = struct
 	(** A literal byte value. *)
     | Int of int
         (** A literal native int value. *)
+    | Int64 of Int64.t
+        (** A literal 64-bit int value. *)
     | Float of float
         (** A literal 64-bit floating point value. *)
     | Struct of t list
@@ -134,7 +137,7 @@ module Expr = struct
             arguments. *)
     | Printf of string * t list
         (** Call C printf (unsafe). *)
-    | IntOfFloat of [`Byte | `Int] * t
+    | IntOfFloat of [`Byte | `Int | `Int64] * t
         (** Convert a float to an int. *)
     | FloatOfInt of [`Float] * t
         (** Convert an int to a float. *)
@@ -250,6 +253,7 @@ module Expr = struct
     | Bool b -> sprintf "Bool %b" b
     | Byte n -> sprintf "Byte %d" n
     | Int n -> sprintf "Int %d" n
+    | Int64 n -> sprintf "Int64 %Ld" n
     | Float x -> sprintf "Float %g" x
     | Struct xs ->
         sprintf "Struct[%a]" (to_strings "; ") xs
@@ -378,6 +382,7 @@ module Expr = struct
     | Bool _
     | Byte _
     | Int _
+    | Int64 _
     | Float _
     | Var _
     | Load _
@@ -512,6 +517,8 @@ end
 (** Binding to a function that enables TCO in LLVM. *)
 external enable_tail_call_opt : unit -> unit = "llvm_enable_tail_call_opt"
 
+let () = enable_tail_call_opt()
+
 let llcontext = global_context()
 
 let void_type = void_type llcontext
@@ -553,12 +560,13 @@ let int_type = match Sys.word_size with
 (** Is the given type represented by a struct. *)
 let is_struct = function
   | `Array _ | `Struct _ | `Reference -> true
-  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> false
+  | `Unit | `Bool | `Byte | `Int | `Int64 | `Float | `Function _ -> false
 
 (** Is the given type a reference type. *)
 let is_ref_type = function
   | `Array _ | `Reference -> true
-  | `Struct _ | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> false
+  | `Struct _ | `Unit | `Bool | `Byte | `Int | `Int64 | `Float
+  | `Function _ -> false
 
 (** Layout of a reference type. *)
 module Ref = struct
@@ -593,6 +601,7 @@ let rec lltype_of : Type.t -> lltype = function
   | `Bool -> i1_type
   | `Byte -> i8_type
   | `Int -> int_type
+  | `Int64 -> i64_type
   | `Float -> float_type
   | `Struct tys -> struct_type_of tys
   | `Function ty -> pointer_type(function_type_of ty)
@@ -644,6 +653,11 @@ let int8 n = const_int i8_type n
 (** Create an LLVM 32-bit int. *)
 let int32 n = const_int i32_type n
 
+(** Create an LLVM 64-bit int. *)
+(* FIXME: We should use const_int_of_string to allow the full range of
+   64-bit int literals. *)
+let int64 n = const_int i64_type (Int64.to_int n)
+
 (** Create an LLVM 64-bit float. *)
 let float64 x = const_float (lltype_of `Float) x
 
@@ -656,6 +670,7 @@ let rec null_of = function
   | `Bool -> Bool false
   | `Byte -> Byte 0
   | `Int -> Int 0
+  | `Int64 -> Int64 0L
   | `Float -> Float 0.0
   | `Struct tys -> Struct(List.map null_of tys)
   | `Array ty -> Alloc(Int 0, null_of ty)
@@ -674,12 +689,12 @@ let find k kvs =
 let m = create_module llcontext "toplevel"
 
 (** Global LLVM module provider. *)
-let mp = ModuleProvider.create m
+(* let mp = ModuleProvider.create m *)
 
 (** Global LLVM execution engine. *)
 let ee =
   ignore(Llvm_executionengine.initialize_native_target());
-  ExecutionEngine.create_jit mp
+  ExecutionEngine.create_jit m 0
 
 (** Type used to represent stacks and unordered sequences (bags). *)
 (* FIXME: Sequences should resize themselves when more space is required
@@ -1234,6 +1249,7 @@ and expr_aux vars state = function
   | Bool b -> state, (const_int i1_type (if b then 1 else 0), `Bool)
   | Byte n -> state, (int8 n, `Byte)
   | Int n -> state, (int n, `Int)
+  | Int64 n -> state, (int64 n, `Int64)
   | Float x -> state, (float64 x, `Float)
   | Struct fs ->
       let state, (fs, tys_f) = exprs vars state fs in
@@ -1287,29 +1303,37 @@ and expr_aux vars state = function
       state, (x, ty_x)
   | UnArith(`Neg, f) ->
       let state, (f, f_ty) = expr vars state f in
-      state, (build_neg f "" state#bb, f_ty)
+      let build =
+	match f_ty with
+	| `Int | `Int64 -> build_neg
+	| `Float -> build_fneg
+	| _ -> invalid_arg "expr.unarith" in
+      state, (build f "" state#bb, f_ty)
   | BinArith(op, f, g) ->
       let state, (f, f_ty), (g, g_ty) = expr2 vars state f g in
-      let build, ty_ret =
+      let build =
 	match op, (f_ty, g_ty) with
-	| `Add, (`Int, `Int | `Float, `Float) -> build_add, f_ty
-	| `Sub, (`Int, `Int | `Float, `Float) -> build_sub, f_ty
-	| `Mul, (`Int, `Int | `Float, `Float) -> build_mul, f_ty
-	| `Div, (`Int, `Int) -> build_sdiv, `Int
-	| `Mod, (`Int, `Int) -> build_srem, `Int
-	| `Div, (`Float, `Float) -> build_fdiv, `Float
+	| `Add, (`Int, `Int | `Int64, `Int64) -> build_add
+	| `Sub, (`Int, `Int | `Int64, `Int64) -> build_sub
+	| `Mul, (`Int, `Int | `Int64, `Int64) -> build_mul
+	| `Add, (`Float, `Float) -> build_fadd
+	| `Sub, (`Float, `Float) -> build_fsub
+	| `Mul, (`Float, `Float) -> build_fmul
+	| `Div, (`Int, `Int | `Int64, `Int64) -> build_sdiv
+	| `Mod, (`Int, `Int | `Int64, `Int64) -> build_srem
+	| `Div, (`Float, `Float) -> build_fdiv
 	| _ -> invalid_arg "expr.arith" in
-      state, (build f g "" state#bb, ty_ret)
+      state, (build f g "" state#bb, f_ty)
   | Cmp(op, f, g) ->
       let state, (f, f_ty), (g, g_ty) = expr2 vars state f g in
       let build =
 	match op, (f_ty, g_ty) with
-	| `Lt, (`Int, `Int) -> build_icmp Icmp.Slt
-	| `Le, (`Int, `Int) -> build_icmp Icmp.Sle
-	| `Eq, (`Int, `Int) -> build_icmp Icmp.Eq
-	| `Ne, (`Int, `Int) -> build_icmp Icmp.Ne
-	| `Ge, (`Int, `Int) -> build_icmp Icmp.Sge
-	| `Gt, (`Int, `Int) -> build_icmp Icmp.Sgt
+	| `Lt, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Slt
+	| `Le, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sle
+	| `Eq, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Eq
+	| `Ne, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Ne
+	| `Ge, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sge
+	| `Gt, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sgt
 	| `Lt, (`Float, `Float) -> build_fcmp Fcmp.Olt
 	| `Le, (`Float, `Float) -> build_fcmp Fcmp.Ole
 	| `Eq, (`Float, `Float) -> build_fcmp Fcmp.Oeq
@@ -1472,7 +1496,8 @@ and expr_aux vars state = function
 	    expr vars state
 	      (If(Var "x", Printf("true", []), Printf("false", [])))
 	| `Byte | `Int -> expr vars state (Printf("%d", [Var "x"]))
-	| `Float -> expr vars state (Printf("%g", [Var "x"]))
+	| `Int64 -> expr vars state (Printf("%lldL", [Var "x"]))
+	| `Float -> expr vars state (Printf("%#g", [Var "x"]))
 	| `Struct tys ->
 	    let aux i = Print(GetValue(Var "x", i)) in
 	    let xs = List.init (List.length tys) aux in
@@ -1747,7 +1772,7 @@ and gc_root vars state v ty =
   if !Options.debug then
     printf "gc_root %s\n%!" (Type.to_string () ty);
   match ty with
-  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> state
+  | `Unit | `Bool | `Byte | `Int | `Int64 | `Float | `Function _ -> state
   | `Struct tys ->
       let f (i, state) ty =
 	let v = lazy(extractvalue state (Lazy.force v) i) in
@@ -1991,7 +2016,7 @@ and def_visit vars name c ty =
 (** Generate an expression that applies the function "f" to every value of a
     reference type in the value "v". *)
 and visit vars v = function
-  | `Unit | `Bool | `Byte | `Int | `Float | `Function _ -> Unit, vars
+  | `Unit | `Bool | `Byte | `Int | `Int64 | `Float | `Function _ -> Unit, vars
   | `Struct tys ->
       let f (i, (fs, vars)) ty =
 	let f, vars = visit vars (GetValue(v, i)) ty in

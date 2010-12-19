@@ -1,7 +1,9 @@
 type ty =
     [ `Unit
     | `Bool
+    | `Byte
     | `Int
+    | `Int64
     | `Float
     | `Tuple of ty list
     | `Array of ty
@@ -21,7 +23,9 @@ type patt =
 and t =
   | Unit
   | Bool of bool
+  | Byte of int
   | Int of int
+  | Int64 of Int64.t
   | Float of float
   | String of string
   | Var of string
@@ -37,7 +41,8 @@ and t =
   | Match of t * (patt * t) list
 
 let rewrite r = function
-  | Unit | Bool _ | Int _ | Float _ | String _ | Var _ as f -> f
+  | Unit | Bool _ | Byte _ | Int _ | Int64 _ | Float _ | String _
+  | Var _ as f -> f
   | Apply(f, x) -> Apply(r f, r x)
   | Tuple xs -> Tuple(List.map r xs)
   | UnArith(op, x) -> UnArith(op, r x)

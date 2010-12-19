@@ -6,6 +6,7 @@
     | "unit" -> `Unit
     | "bool" -> `Bool
     | "int" -> `Int
+    | "int64" -> `Int64
     | "float" -> `Float
     | ty_name -> `Name ty_name
 
@@ -24,7 +25,7 @@
 %token LT LE EQ NE GE GT
 %token DOT LEFTARROW SEMI SEMISEMI
 %token <char> CHAR
-%token <string> INT
+%token <string> INT INT64
 %token <string> FLOAT
 %token <Expr.cmp> CMP
 %token <string> IDENT
@@ -61,7 +62,7 @@
 %left prec_apply
 %left DOT
 %nonassoc prec_simple
-%nonassoc OPEN CHAR INT FLOAT IDENT STRING
+%nonassoc OPEN CHAR INT INT64 FLOAT IDENT STRING
 
 %%
 
@@ -96,9 +97,11 @@ simple_patt:
 | OPEN patt CLOSE { $2 }
 | IDENT { PVar $1 }
 | OPEN CLOSE { PLit(Unit) }
-| CHAR { PLit(Int(int_of_char $1)) }
+| CHAR { PLit(Byte(int_of_char $1)) }
 | MINUS INT { PLit(Int(-int_of_string $2)) }
 | INT { PLit(Int(int_of_string $1)) }
+| MINUS INT64 { PLit(Int64(Int64.of_string("-"^$2))) }
+| INT64 { PLit(Int64(Int64.of_string $1)) }
 | MINUS FLOAT { PLit(Float(-. float_of_string $2)) }
 | FLOAT { PLit(Float(float_of_string $1)) }
 | STRING { PLit(String $1) }
@@ -119,8 +122,9 @@ expr_comma_list:
 simple_expr:
 | OPEN CLOSE { Unit }
 | OPEN expr CLOSE { $2 }
-| CHAR { Int(int_of_char $1) }
+| CHAR { Byte(int_of_char $1) }
 | INT { Int(int_of_string $1) }
+| INT64 { Int64(Int64.of_string $1) }
 | FLOAT { Float(float_of_string $1) }
 | STRING { String $1 }
 | IDENT { Var($1) }

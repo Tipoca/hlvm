@@ -9,7 +9,9 @@ type ty_env = { defs: (string * ty) list }
 let rec ty ty_env : ty -> Hlvm.Type.t = function
   | `Unit -> `Unit
   | `Bool -> `Bool
+  | `Byte -> `Byte
   | `Int -> `Int
+  | `Int64 -> `Int64
   | `Float -> `Float
   | `Tuple tys -> `Struct(List.map (ty ty_env) tys)
   | `Array t -> `Array(ty ty_env t)
@@ -110,16 +112,18 @@ let rec pmatch arg = function
 let rec compile = function
   | Unit -> Expr.Unit
   | Bool b -> Expr.Bool b
+  | Byte c -> Expr.Byte c
   | Int n -> Expr.Int n
+  | Int64 n -> Expr.Int64 n
   | Float x -> Expr.Float x
-  | Var "false" -> Expr.Bool false
-  | Var "true" -> Expr.Bool true
-  | Var "pi" -> Expr.Float(4. *. atan 1.)
+  | Var "false$1" -> Expr.Bool false
+  | Var "true$1" -> Expr.Bool true
+  | Var "pi$1" -> Expr.Float(4. *. atan 1.)
   | Var s -> Expr.Var s
-  | Apply(Var "print", String s) -> Expr.Printf(s, [])
-  | Apply(Var "print", a) -> Expr.Print(compile a)
-  | Apply(Var "length", a) -> Expr.Length(compile a)
-  | Apply(Var "create", Tuple[n; x]) -> Expr.Alloc(compile n, compile x)
+  | Apply(Var "print$1", String s) -> Expr.Printf(s, [])
+  | Apply(Var "print$1", a) -> Expr.Print(compile a)
+  | Apply(Var "length$1", a) -> Expr.Length(compile a)
+  | Apply(Var "create$1", Tuple[n; x]) -> Expr.Alloc(compile n, compile x)
   | Apply(f, x) -> Expr.Apply(compile f, [compile x])
   | Tuple xs -> Expr.Struct(List.map compile xs)
   | UnArith(`Neg, x) -> Expr.UnArith(`Neg, compile x)
@@ -170,9 +174,33 @@ let token lexbuf =
   printf "Token: %s\n%!" s;
   tok
 
+let eval (ty_env, vars) = function
+  | Expr f ->
+      let f = alpha vars f in
+      Hlvm.eval(`Expr(compile f));
+      ty_env, vars
+  | DefUnion(t, cs) ->
+      let ty_env = { ty_env with defs = (t, `Union [])::ty_env.defs } in
+      let aux vars (c, t) =
+	let c = name vars c in
+	let vars = next vars c in
+	Hlvm.eval(`Type(c, ty ty_env t));
+	Hlvm.eval(`Function(c, ["x", ty ty_env t],
+			    `Reference, Expr.Construct(c, Expr.Var "x")));
+	vars in
+      let vars = List.fold_left aux vars cs in
+      { ty_env with defs = (t, `Union cs)::ty_env.defs }, vars
+  | Defun(f, p, ty_x, ty_ret, body) ->
+      let vars = next vars f in
+      let dummy = sprintf "frontend`fnarg%d" (unique()) in
+      let body = alpha vars (LetIn(p, Var dummy, body)) in
+      Hlvm.eval(`Function(name vars f, [name vars dummy, ty ty_env ty_x],
+			  ty ty_env ty_ret, compile body));
+      ty_env, vars
+
 (** Provide an interactive top-level that inputs expressions and function
     definitions from the user and compiles and runs them using HLVM. *)
-let rec repl ty_env vars =
+let rec repl (ty_env, vars) =
   printf "# %!";
   let ty_env, vars =
     try
@@ -180,40 +208,7 @@ let rec repl ty_env vars =
       let ch = open_out "expr.dat" in
       output_value ch f;
       close_out ch;
-      match f with
-      | Expr f ->
-	  let f = alpha vars f in
-(*
-*)
-	  Hlvm.eval(`Expr(compile f));
-	  ty_env, vars
-      | DefUnion(t, cs) ->
-	  let ty_env = { ty_env with defs = (t, `Union [])::ty_env.defs } in
-	  let aux vars (c, t) =
-	    let c = name vars c in
-	    let vars = next vars c in
-(*
-*)
-	    Hlvm.eval(`Type(c, ty ty_env t));
-	      Hlvm.eval(`Function(c, ["x", ty ty_env t], `Reference, Expr.Construct(c, Expr.Var "x")));
-	      vars in
-	  let vars = List.fold_left aux vars cs in
-	    { ty_env with defs = (t, `Union cs)::ty_env.defs }, vars
-      | Defun(f, p, ty_x, ty_ret, body) ->
-	  let vars = next vars f in
-(*
-*)
-	  let dummy = sprintf "frontend`fnarg%d" (unique()) in
-(*
-	  let body = LetIn(p, Var dummy, body) in
-	  Hlvm.eval(`Function(f, [dummy, ty ty_env ty_x], ty ty_env ty_ret, compile body));
-*)
-	  let body = alpha vars (LetIn(p, Var dummy, body)) in
-(*
-	    printf "\n\n%s\n%s\n%!" f (Hlvm.Expr.to_string () (compile(LetIn(p, Var dummy, body))));
-*)
-	    Hlvm.eval(`Function(name vars f, [name vars dummy, ty ty_env ty_x], ty ty_env ty_ret, compile body));
-	  ty_env, vars
+      eval (ty_env, vars) f
     with
     | End_of_file -> raise End_of_file
     | Failure "lexing: empty token" as exn ->
@@ -228,30 +223,35 @@ let rec repl ty_env vars =
 	  lexbuf.lex_curr_p.pos_lnum
 	  lexbuf.lex_curr_p.pos_cnum;
 	ty_env, vars in
-  repl ty_env vars
+  repl (ty_env, vars)
 
 (** Bootstrap some built-in functions before allowing the user to define
     new functions. *)
 let () =
   List.iter Hlvm.eval
-    [`Extern("putchar", [`Int], `Unit);
-     `Extern("sin", [`Float], `Float);
-     `Extern("cos", [`Float], `Float);
-     `Function("print_char", ["c", `Int], `Unit,
-	       Expr.Apply(Expr.Var "putchar", [Expr.Var "c"]));
-     `Function("float_of_int", ["n", `Int], `Float,
-	       Expr.FloatOfInt(`Float, Expr.Var "n"));
-     `Function("int_of_float", ["x", `Float], `Int,
-	       Expr.IntOfFloat(`Int, Expr.Var "x"));
-     `Function("float_array", ["nx", `Struct[`Int; `Float]], `Array `Float,
-	       Expr.Alloc(Expr.GetValue(Expr.Var "nx", 0),
-			  Expr.GetValue(Expr.Var "nx", 1)))
+    [
+      `Extern("putchar", [`Int], `Unit);
+      `Extern("sin", [`Float], `Float);
+      `Extern("cos", [`Float], `Float);
+      `Function("sin$1", ["x", `Float], `Float,
+		Expr.Apply(Expr.Var "sin", [Expr.Var "x"]));
+      `Function("cos$1", ["x", `Float], `Float,
+		Expr.Apply(Expr.Var "cos", [Expr.Var "x"]));
+      `Function("print_char$1", ["c", `Int], `Unit,
+		Expr.Apply(Expr.Var "putchar", [Expr.Var "c"]));
+      `Function("float_of_int$1", ["n", `Int], `Float,
+		Expr.FloatOfInt(`Float, Expr.Var "n"));
+      `Function("int_of_float$1", ["x", `Float], `Int,
+		Expr.IntOfFloat(`Int, Expr.Var "x"));
+      `Function("float_array$1", ["nx", `Struct[`Int; `Float]], `Array `Float,
+		Expr.Alloc(Expr.GetValue(Expr.Var "nx", 0),
+			   Expr.GetValue(Expr.Var "nx", 1)))
     ];
-(*
-  Hlvm.debug := true;
-*)
+  (*
+    Hlvm.debug := true;
+  *)
   try
-    repl { defs = [] } (fun _ -> 1)
+    repl ({ defs = [] }, fun _ -> 1)
   with End_of_file ->
     Hlvm.save();
     printf "\n"

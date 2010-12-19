@@ -26,6 +26,7 @@ rule token = parse
   | [' ' '\t']       { token lexbuf }
   | '\n'             { Lexing.new_line lexbuf; token lexbuf }
   | floating as s    { FLOAT s }
+  | digit+ as s 'L'  { INT64 s }
   | digit+ as s      { INT s }
   | ident as s       { ident s }
   | "'\\n'"          { CHAR '\n' }

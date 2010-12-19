@@ -1,3 +1,12 @@
+Wed Dec  1 22:35:30 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
+
+	* Updated arithmetic ops to use fadd, fsub etc. for floating point
+	because using add, sub etc. for int and float has been deprecated in
+	LLVM 2.8.
+	* Removed the -f flag passed to llc in the opt.sh script because it was
+	also deprecated in LLVM 2.8.
+	
+
 Sat Jan 16 12:17:05 GMT 2010  Jon Harrop <jon@ffconsultancy.com>
 
 	* Disabling TCO now uses a separate set of tests that do not require

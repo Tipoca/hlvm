@@ -6,6 +6,48 @@ open Expr
 
 let ( |> ) x f = f x
 let floatOfInt x = FloatOfInt(`Float, x)
+(*
+let forloopN = ref 1
+
+let forloop i0 i1 body : Hlvm.t list =
+  let f = sprintf "for%d" !forloopN in
+  incr forloopN;
+  [ `Function
+      (f, ["i0", `Int; "i2", `Int], `Unit,
+       If(Var "i0" =: Var "i2", Unit,
+	  If(Var "i0" +: Int 1 =: Var "i2", body (Var "i0"),
+	     Let("i1", (Var "i0" +: Var "i2") /: Int 2,
+		 compound
+		   [ Apply(Var f, [Var "i0"; Var "i1"]);
+		     Apply(Var f, [Var "i1"; Var "i2"]) ])))) ]
+*)
+(** Correctness test for the Boehm GC. *)
+let boehm : Hlvm.t list =
+  let n = 1048576 in
+  [ `Function
+      ("fill", [ "a", `Array `Int;
+		 "rand", `Int;
+		 "i", `Int ], `Unit,
+       If(Var "i" <: Int n,
+	  compound
+	    [ Set(Var "a", Var "i", Var "rand");
+	      Apply(Var "fill",
+		    [Var "a";
+		     Var "rand" *: Int 1664525 +: Int 1013904223;
+		     Var "i" +: Int 1]) ],
+	  Unit));
+
+    `Function("loop", [ "i", `Int ], `Unit,
+	      If(Var "i" <: Int 1, Unit,
+		 Let("", Alloc(Var "i", Byte 0),
+		     Apply(Var "loop", [ Var "i" -: Int 1 ]))));
+
+    `Expr
+      (compound
+	 [ Let("p", Alloc(Int n, Int 0),
+	       compound
+		 [ Apply(Var "fill", [Var "p"; Int 1; Int 0]);
+		   Apply(Var "loop", [Int 32768]) ]) ]) ]
 
 (** Integer Fibonacci benchmark *)
 let fib ns : Hlvm.t list =
@@ -1069,9 +1111,12 @@ let ray args : Hlvm.t list =
 let () =
   let defs =
     if !Options.tco then
-      queens [] @
+      tco 100000000 @
+(*
+	boehm @
+	queens [8; 8; 9; 10; 11] @
+      queens [8] @
 	threads 8 @
-	tco 100000000 @
 	tuples @
 	trig @
 	curry @
@@ -1086,9 +1131,11 @@ let () =
 	gc [1000; 1000000] @
 	list [1000; 3000000] @
 	ray(List.init 24 (fun i -> "image_11_2048.pgm", 8-i/3, 11, 2048)) @
+*)
 	[]
     else
-      queens [] @
+      boehm @
+      queens [8; 8; 9; 10; 11] @
 	threads 8 @
 	tuples @
 	trig @
