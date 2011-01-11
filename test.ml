@@ -419,7 +419,7 @@ let list_length ty : Hlvm.t =
 (** Solve the n-queens problem using linked lists. *)
 let queens ns =
   let x1 = Var "x1" and x2 = Var "x2" and y1 = Var "y1" and y2 = Var "y2" in
-  let ty_pos = `Struct[`Int; `Int] in
+  let ty_pos = `Struct[`Byte; `Byte] in
   let rec init n f = if n=0 then [] else f(n-1) :: init (n-1) f in
   ty_list ty_pos @
     [ list_length ty_pos;
@@ -501,15 +501,15 @@ let queens ns =
 				 Var "ps";
 				 Var "accu"])])));
 
-      `Function("ps", [ "n", `Int;
-			"i", `Int;
-			"j", `Int ], `Reference,
+      `Function("ps", [ "n", `Byte;
+			"i", `Byte;
+			"j", `Byte ], `Reference,
 		If(Var "i" =: Var "n",
-		   If(Var "j" =: Var "n" -: Int 1,
+		   If(Var "j" =: Var "n" -: Byte 1,
 		      nil,
-		      Apply(Var "ps", [Var "n"; Int 0; Var "j" +: Int 1])),
+		      Apply(Var "ps", [Var "n"; Byte 0; Var "j" +: Byte 1])),
 		   cons (Struct[Var "i"; Var "j"])
-		     (Apply(Var "ps", [Var "n"; Var "i" +: Int 1; Var "j"]))));
+		     (Apply(Var "ps", [Var "n"; Var "i" +: Byte 1; Var "j"]))));
 
       `Function("f", ["", `Reference; "n", `Int], `Int, Var "n" +: Int 1)] @
     List.map
@@ -521,7 +521,7 @@ let queens ns =
 		    [Var "f";
 		     Int n;
 		     nil;
-		     Apply(Var "ps", [Int n; Int 0; Int 0]);
+		     Apply(Var "ps", [Byte n; Byte 0; Byte 0]);
 		     Int 0]) ]))
     ns
 
@@ -1111,11 +1111,11 @@ let ray args : Hlvm.t list =
 let () =
   let defs =
     if !Options.tco then
-      tco 100000000 @
+      queens [8; 8; 9; 10; 11] @
 (*
+      tco 100000000 @
 	boehm @
 	queens [8; 8; 9; 10; 11] @
-      queens [8] @
 	threads 8 @
 	tuples @
 	trig @

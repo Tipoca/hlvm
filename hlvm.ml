@@ -42,7 +42,7 @@ module Options = struct
   let stack_handler = ref true
 
   (** The maximum number of times a recursive function will be unrolled. *)
-  let unroll = 0
+  let unroll = 8
 end
 
 let rec list_to_string f sep () = function
@@ -137,6 +137,8 @@ module Expr = struct
             arguments. *)
     | Printf of string * t list
         (** Call C printf (unsafe). *)
+    | IntOfInt of [`Byte | `Int | `Int64] * t
+        (** Convert from one integer type to another. *)
     | IntOfFloat of [`Byte | `Int | `Int64] * t
         (** Convert a float to an int. *)
     | FloatOfInt of [`Float] * t
@@ -282,6 +284,8 @@ module Expr = struct
         sprintf "Apply(%a, [%a])" to_string f (to_strings "; ") xs
     | Printf(s, fs) ->
         sprintf "Printf(\"%s\", [%a])" (String.escaped s) (to_strings "; ") fs
+    | IntOfInt(_, f) ->
+        sprintf "IntOfInt(%a)" to_string f
     | IntOfFloat(_, f) ->
         sprintf "IntOfFloat(%a)" to_string f
     | FloatOfInt(_, f) ->
@@ -354,6 +358,7 @@ module Expr = struct
     | Set(a, i, x) -> Set(r a, r i, r x)
     | Apply(f, xs) -> Apply(r f, List.map r xs)
     | Printf(s, xs) -> Printf(s, List.map r xs)
+    | IntOfInt(ty, x) -> IntOfInt(ty, r x)
     | IntOfFloat(ty, x) -> IntOfFloat(ty, r x)
     | FloatOfInt(ty, x) -> FloatOfInt(ty, r x)
     | Construct(c, v) -> Construct(c, r v)
@@ -1305,7 +1310,7 @@ and expr_aux vars state = function
       let state, (f, f_ty) = expr vars state f in
       let build =
 	match f_ty with
-	| `Int | `Int64 -> build_neg
+	| `Byte | `Int | `Int64 -> build_neg
 	| `Float -> build_fneg
 	| _ -> invalid_arg "expr.unarith" in
       state, (build f "" state#bb, f_ty)
@@ -1313,33 +1318,39 @@ and expr_aux vars state = function
       let state, (f, f_ty), (g, g_ty) = expr2 vars state f g in
       let build =
 	match op, (f_ty, g_ty) with
-	| `Add, (`Int, `Int | `Int64, `Int64) -> build_add
-	| `Sub, (`Int, `Int | `Int64, `Int64) -> build_sub
-	| `Mul, (`Int, `Int | `Int64, `Int64) -> build_mul
+	| `Add, (`Byte, `Byte | `Int, `Int | `Int64, `Int64) -> build_add
+	| `Sub, (`Byte, `Byte | `Int, `Int | `Int64, `Int64) -> build_sub
+	| `Mul, (`Byte, `Byte | `Int, `Int | `Int64, `Int64) -> build_mul
 	| `Add, (`Float, `Float) -> build_fadd
 	| `Sub, (`Float, `Float) -> build_fsub
 	| `Mul, (`Float, `Float) -> build_fmul
-	| `Div, (`Int, `Int | `Int64, `Int64) -> build_sdiv
-	| `Mod, (`Int, `Int | `Int64, `Int64) -> build_srem
+	| `Div, (`Byte, `Byte | `Int, `Int | `Int64, `Int64) -> build_sdiv
+	| `Mod, (`Byte, `Byte | `Int, `Int | `Int64, `Int64) -> build_srem
 	| `Div, (`Float, `Float) -> build_fdiv
 	| _ -> invalid_arg "expr.arith" in
       state, (build f g "" state#bb, f_ty)
   | Cmp(op, f, g) ->
       let state, (f, f_ty), (g, g_ty) = expr2 vars state f g in
       let build =
-	match op, (f_ty, g_ty) with
-	| `Lt, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Slt
-	| `Le, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sle
-	| `Eq, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Eq
-	| `Ne, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Ne
-	| `Ge, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sge
-	| `Gt, (`Int, `Int | `Int64, `Int64) -> build_icmp Icmp.Sgt
-	| `Lt, (`Float, `Float) -> build_fcmp Fcmp.Olt
-	| `Le, (`Float, `Float) -> build_fcmp Fcmp.Ole
-	| `Eq, (`Float, `Float) -> build_fcmp Fcmp.Oeq
-	| `Ne, (`Float, `Float) -> build_fcmp Fcmp.One
-	| `Ge, (`Float, `Float) -> build_fcmp Fcmp.Oge
-	| `Gt, (`Float, `Float) -> build_fcmp Fcmp.Ogt
+	match f_ty, g_ty with
+	| `Byte, `Byte | `Int, `Int | `Int64, `Int64 ->
+	  let op = match op with
+	  | `Lt -> Icmp.Slt
+	  | `Le -> Icmp.Sle
+	  | `Eq -> Icmp.Eq
+	  | `Ne -> Icmp.Ne
+	  | `Ge -> Icmp.Sge
+	  | `Gt -> Icmp.Sgt in
+	  build_icmp op
+	| `Float, `Float ->
+	  let op = match op with
+	  | `Lt -> Fcmp.Olt
+	  | `Le -> Fcmp.Ole
+	  | `Eq -> Fcmp.Oeq
+	  | `Ne -> Fcmp.One
+	  | `Ge -> Fcmp.Oge
+	  | `Gt -> Fcmp.Ogt in
+	  build_fcmp op
 	| _ -> invalid_arg "expr.cmp" in
       state, (build f g "" state#bb, `Bool)
   | Return(If(p, t, f), ty_ret) ->
@@ -1476,6 +1487,16 @@ and expr_aux vars state = function
       let args = List.map ext args in
       ignore(state#call CallConv.c Extern.printf (spec::args));
       state, (unit, `Unit)
+  | IntOfInt(ty, f) ->
+      let ty = (ty :> Type.t) in
+      let state, (f, ty_f) = expr vars state f in
+      let build = match ty_f, ty with
+      | `Byte, `Int | `Int, `Int64 -> build_zext
+      | `Int64, `Int | `Int, `Byte -> build_trunc
+      | `Byte, `Byte | `Int, `Int | `Int64, `Int64 ->
+	(fun f _ _ _ -> f)
+      | _ -> invalid_arg "IntOfInt" in
+      state, (build f (lltype_of ty) "" state#bb, ty)
   | IntOfFloat(ty, f) ->
       let ty = (ty :> Type.t) in
       let state, (f, ty_f) = expr vars state f in
@@ -1484,6 +1505,7 @@ and expr_aux vars state = function
   | FloatOfInt(ty, f) ->
       let ty = (ty :> Type.t) in
       let state, (f, ty_f) = expr vars state f in
+      (* FIXME: Should also handle Byte and Int64 integers. *)
       type_check "FloatOfInt of non-int" ty_f `Int;
       state, (build_sitofp f (lltype_of ty) "" state#bb, ty)
   | Print f ->
